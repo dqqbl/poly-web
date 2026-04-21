@@ -1904,6 +1904,43 @@ async function autoClaimCycle(): Promise<void> {
 
 // ── Claim 核心逻辑 ───────────────────────────────────────────
 let claimInProgress = false;
+let safeClaimSupport: boolean | null = null;
+const POLY_PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
+
+async function detectSafeClaimSupport(
+  provider: ethers.Provider,
+  safeAddress: string,
+): Promise<boolean> {
+  try {
+    const code = await provider.getCode(safeAddress);
+    if (!code || code === "0x") return false;
+    const nonceData = new ethers.Interface([
+      "function nonce() view returns (uint256)",
+    ]).encodeFunctionData("nonce");
+    await provider.call({ to: safeAddress, data: nonceData });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getProxyOwnerAddress(
+  provider: ethers.Provider,
+  proxyAddress: string,
+): Promise<string | null> {
+  try {
+    const ownerData = new ethers.Interface([
+      "function owner() view returns (address)",
+    ]).encodeFunctionData("owner");
+    const raw = await provider.call({ to: proxyAddress, data: ownerData });
+    const [owner] = new ethers.Interface([
+      "function owner() view returns (address)",
+    ]).decodeFunctionResult("owner", raw);
+    return String(owner);
+  } catch {
+    return null;
+  }
+}
 
 async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ title: string; txHash?: string; error?: string }[]> {
   const { refreshAfter = true } = options;
@@ -1929,7 +1966,26 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
     "function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 nonce) view returns (bytes32)",
     "function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address payable refundReceiver, bytes memory signatures) public payable returns (bool)",
   ]);
+  const proxyFactoryIface = new ethers.Interface([
+    "function proxy((uint8 typeCode,address to,uint256 value,bytes data)[] calls) payable returns (bytes[] returnValues)",
+  ]);
   const safe = new ethers.Contract(PROXY_ADDRESS, safeIface, wallet);
+  const proxyFactory = new ethers.Contract(POLY_PROXY_FACTORY_ADDRESS, proxyFactoryIface, wallet);
+
+  if (safeClaimSupport == null) {
+    safeClaimSupport = await detectSafeClaimSupport(provider, PROXY_ADDRESS);
+  }
+  const claimMode = safeClaimSupport ? "safe" : "proxy_factory";
+  console.log(`[Claim] 使用执行模式: ${claimMode}`);
+  if (claimMode === "proxy_factory") {
+    const owner = await getProxyOwnerAddress(provider, PROXY_ADDRESS);
+    if (owner && owner.toLowerCase() !== wallet.address.toLowerCase()) {
+      const msg = `当前私钥地址 ${wallet.address} 不是代理钱包 owner(${owner})，无法发起 claim。请在 .env 使用该代理钱包对应的私钥。`;
+      console.error(`[Claim] ${msg}`);
+      claimInProgress = false;
+      return claimablePositions.map((p) => ({ title: p.title, error: msg }));
+    }
+  }
 
   const snapshot = [...claimablePositions];
   const total = snapshot.length;
@@ -1944,14 +2000,22 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
         const calldata = ctfIface.encodeFunctionData("redeemPositions", [
           USDC_ADDR, ZERO_BYTES32, p.conditionId, [1, 2]
         ]);
-        const nonce = await safe.nonce();
-        console.log(`[Claim] nonce:${nonce} 构建交易中...`);
-        const txHash = await safe.getTransactionHash(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, nonce);
-        const sig = await wallet.signMessage(ethers.getBytes(txHash));
-        const v = parseInt(sig.slice(-2), 16) + 4;
-        const adjustedSig = sig.slice(0, -2) + v.toString(16).padStart(2, '0');
-        console.log(`[Claim] 发送交易...`);
-        const tx = await safe.execTransaction(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, adjustedSig);
+        let tx: ethers.TransactionResponse;
+        if (claimMode === "safe") {
+          const nonce = await safe.nonce();
+          console.log(`[Claim] nonce:${nonce} 构建 Safe 交易...`);
+          const txHash = await safe.getTransactionHash(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, nonce);
+          const sig = await wallet.signMessage(ethers.getBytes(txHash));
+          const v = parseInt(sig.slice(-2), 16) + 4;
+          const adjustedSig = sig.slice(0, -2) + v.toString(16).padStart(2, '0');
+          console.log(`[Claim] 发送 Safe 交易...`);
+          tx = await safe.execTransaction(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, adjustedSig);
+        } else {
+          console.log(`[Claim] 发送 ProxyFactory 交易...`);
+          tx = await proxyFactory.proxy([
+            { typeCode: 1, to: CTF, value: 0, data: calldata },
+          ]);
+        }
         console.log(`[Claim] 等待上链 txHash:${tx.hash}`);
         const receipt = await Promise.race([
           tx.wait(),

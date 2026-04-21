@@ -139,34 +139,62 @@ pm2 startup systemd
 
 **⚠️ 警告：不要直接把服务器的 3456 端口开放到公网，任何人访问都可以下单！**
 
-### 方式 1：SSH 隧道（推荐，最简单）
+### 方式 1：当前电脑直接连（Mac / Windows）
 
-在**本地电脑**（Mac/Windows）新开一个终端，执行：
+在**本地电脑**新开一个终端，执行：
 
+**Mac：**
 ```bash
 ssh -i "/Users/dqqbl/myweb/rsa/poly-Ireland.pem" -L 3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
 ```
 
-保持这个窗口运行，然后在本地浏览器打开：
-
+**Windows（PowerShell / CMD）：**
+```powershell
+ssh -i "C:\Users\你的用户名\Desktop\poly-Ireland.pem" -L 3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
 ```
-http://localhost:3456
-```
 
-### 方式 2：带 SSH 隧道的后台连接
+> 💡 **Windows 提示**：Windows 10/11 自带 OpenSSH，无需安装。如果提示权限错误，右键 `.pem` 文件 → 属性 → 安全 → 删除其他用户的权限，只保留当前用户。
 
-如果希望 SSH 隧道也在后台运行，本地执行：
+保持窗口运行，然后在浏览器打开 `http://localhost:3456`。
+
+---
+
+### 方式 2：从另一台电脑连接（密钥只在本机时）
+
+如果 `.pem` 私钥只在**当前电脑**上，另一台电脑没有密钥，需要先复制密钥：
+
+1. **把密钥文件复制到另一台电脑**
+   - 当前密钥路径：`/Users/dqqbl/myweb/rsa/poly-Ireland.pem`
+   - 用微信文件传输、U盘、邮件等方式发送到目标电脑
+   - Windows 建议放到桌面：`C:\Users\你的用户名\Desktop\poly-Ireland.pem`
+
+2. **在另一台电脑上开 SSH 隧道**
+
+   **另一台 Mac：**
+   ```bash
+   ssh -i "/path/to/poly-Ireland.pem" -L 3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
+   ```
+
+   **另一台 Windows（PowerShell）：**
+   ```powershell
+   ssh -i "C:\Users\你的用户名\Desktop\poly-Ireland.pem" -L 3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
+   ```
+
+3. 浏览器访问 `http://localhost:3456`
+
+---
+
+### 方式 3：不想复制密钥的替代方案（局域网共享）
+
+如果你不想把密钥复制到其他电脑，可以在**当前已有密钥的电脑**上把隧道绑定到局域网 IP：
 
 ```bash
-ssh -i "/Users/dqqbl/myweb/rsa/poly-Ireland.pem" -fN -L 3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
+ssh -i "/Users/dqqbl/myweb/rsa/poly-Ireland.pem" -fN -L 0.0.0.0:3456:127.0.0.1:3456 ubuntu@ec2-52-211-133-152.eu-west-1.compute.amazonaws.com
 ```
 
-关闭隧道时：
+然后同一局域网内的其他电脑直接访问 `http://当前电脑IP:3456` 即可。
 
-```bash
-# 查找并杀掉对应的 SSH 进程
-lsof -ti:3456 | xargs kill -9
-```
+> ⚠️ **注意**：此方式把面板暴露在局域网，仅建议在家庭可信网络中使用。关闭隧道：`lsof -ti:3456 | xargs kill -9`
 
 ---
 
