@@ -8,7 +8,7 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from "fs";
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { ClobClient, Side, OrderType, Chain, SignatureTypeV2 as SignatureType, AssetType, getContractConfig } from "@polymarket/clob-client-v2";
@@ -545,6 +545,26 @@ async function createClobClient(): Promise<ClobClient | null> {
   writeFileSync(CREDS_FILE, JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase, address: wallet.address }, null, 2));
   console.log("[Auth] 凭证已保存到 .polymarket-creds.json");
   return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress, ...builderOpts });
+}
+
+function clearCachedCreds(): void {
+  try {
+    if (existsSync(CREDS_FILE)) unlinkSync(CREDS_FILE);
+  } catch (err) {
+    console.warn(`[Auth] 清理本地凭证失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function isUnauthorizedApiKeyError(msg: string): boolean {
+  const text = msg.toLowerCase();
+  return text.includes("unauthorized/invalid api key") || (text.includes("unauthorized") && text.includes("api key"));
+}
+
+async function rebuildClobClientCreds(): Promise<boolean> {
+  if (!PRIVATE_KEY) return false;
+  clearCachedCreds();
+  clobClient = null;
+  return ensureClobClient();
 }
 
 // ── HTTP 服务 ─────────────────────────────────────────────────
@@ -1862,7 +1882,7 @@ async function subscribeWindow(windowStart: number): Promise<void> {
 
 // ── Claim 查询 ────────────────────────────────────────────────
 interface ClaimPosition {
-  conditionId: string; title: string; currentValue: number; size: number;
+  conditionId: string; title: string; currentValue: number; size: number; outcomeIndex: number;
 }
 let claimablePositions: ClaimPosition[] = [];
 let claimableTotal = 0;
@@ -1888,9 +1908,9 @@ async function syncClaimable(options: { clearOnError?: boolean } = {}): Promise<
   try {
     const pos = await fetch(
       `https://data-api.polymarket.com/positions?user=${PROXY_ADDRESS}&sizeThreshold=.01&redeemable=true&limit=100&offset=0`
-    ).then(r => r.json()) as Array<{ conditionId: string; title: string; currentValue: number; size: number; curPrice: number }>;
-    claimablePositions = pos.filter(p => p.curPrice === 1).map(p => ({
-      conditionId: p.conditionId, title: p.title, currentValue: p.currentValue, size: p.size,
+    ).then(r => r.json()) as Array<{ conditionId: string; title: string; currentValue: number; size: number; curPrice: number; outcomeIndex?: number; redeemable?: boolean }>;
+    claimablePositions = pos.filter(p => p.redeemable === true && Number(p.currentValue ?? 0) > 0).map(p => ({
+      conditionId: p.conditionId, title: p.title, currentValue: p.currentValue, size: p.size, outcomeIndex: Number(p.outcomeIndex ?? 0),
     }));
     claimableTotal = claimablePositions.reduce((s, p) => s + p.currentValue, 0);
     broadcast("claimable", { total: claimableTotal, positions: claimablePositions });
@@ -2045,7 +2065,7 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
 
   const contracts = getContractConfig(137);
   const CTF = contracts.conditionalTokens;
-  const USDC_ADDR = contracts.collateral;  // V2 升级后为 pUSD
+  const USDC_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // 与 poly-redeem 一致，CTF redeem 使用 USDC.e
   const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
   const provider = new ethers.JsonRpcProvider("https://polygon-bor-rpc.publicnode.com", 137, { staticNetwork: true });
@@ -2092,8 +2112,9 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
       console.log(`[Claim] (${i+1}/${total}) ${p.title} 金额:${p.currentValue.toFixed(2)} conditionId:${p.conditionId}`);
       broadcast("claimProgress", { current: i, total, title: p.title, status: "running" });
       try {
+        const indexSet = 1 << p.outcomeIndex;
         const calldata = ctfIface.encodeFunctionData("redeemPositions", [
-          USDC_ADDR, ZERO_BYTES32, p.conditionId, [1, 2]
+          USDC_ADDR, ZERO_BYTES32, p.conditionId, [indexSet]
         ]);
         if (relayer) {
           console.log("[Claim] 发送 Relayer(gasless) 交易...");
@@ -2306,11 +2327,19 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
       { tokenID: tokenId, side: side === "buy" ? Side.BUY : Side.SELL, amount: normalizedAmount, price: normalizedWorstPrice },
       { tickSize, negRisk: false }
     );
-    const result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
+    let result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
+    let orderError = extractOrderError(result);
+    const needRefreshCreds = result?.status === 401 || (orderError && isUnauthorizedApiKeyError(orderError));
+    if (needRefreshCreds) {
+      console.warn(`${orderTag} 检测到 API 凭证失效，自动重建并重试一次下单`);
+      if (await rebuildClobClientCreds()) {
+        result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
+        orderError = extractOrderError(result);
+      }
+    }
     const sideZh = side === "buy" ? "买入" : "卖出";
     const dirZh = direction === "up" ? "涨" : "跌";
     const rawStatus = result?.status ?? "未知";
-    const orderError = extractOrderError(result);
 
     if (result?.status === 400 || orderError) {
       console.warn(`${orderTag} ${sideZh}${dirZh} ${normalizedAmount} 状态:${rawStatus} 原因:${orderError || "-"} ${orderDebug}`);
@@ -2347,6 +2376,10 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (isUnauthorizedApiKeyError(msg)) {
+      console.warn(`${orderTag} 捕获到 401 API key 错误，自动重建 CLOB 凭证`);
+      await rebuildClobClientCreds();
+    }
     console.error(`${orderTag} 失败:`, msg);
     return {
       success: false,
