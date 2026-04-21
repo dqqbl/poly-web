@@ -12,6 +12,12 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } fr
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { ClobClient, Side, OrderType, Chain, SignatureTypeV2 as SignatureType, AssetType, getContractConfig } from "@polymarket/clob-client-v2";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
+import { RelayClient, RelayerTxType } from "@polymarket/builder-relayer-client";
+import { createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
+import type { Hex } from "viem";
 import { getAllStrategies, getStrategy, getAllDescriptions } from "./strategies/registry.js";
 import type { StrategyNumber, StrategyDirection, StrategyLifecycleState, StrategyKey } from "./strategies/types.js";
 import { ALL_STRATEGY_KEYS } from "./strategies/types.js";
@@ -175,6 +181,11 @@ const PENDING_TRADE_META_MAX_AGE_MS = 15 * 60 * 1000;
 
 const PRIVATE_KEY   = process.env.POLYMARKET_PRIVATE_KEY || "";
 const PROXY_ADDRESS = process.env.POLYMARKET_PROXY_ADDRESS || "";
+const POLY_BUILDER_API_KEY = process.env.POLY_BUILDER_API_KEY || "";
+const POLY_BUILDER_SECRET = process.env.POLY_BUILDER_SECRET || "";
+const POLY_BUILDER_PASSPHRASE = process.env.POLY_BUILDER_PASSPHRASE || "";
+const POLY_BUILDER_CODE = process.env.POLY_BUILDER_CODE || "";
+const POLY_BUILDER_ADDRESS = process.env.POLY_BUILDER_ADDRESS || "";
 const APP_MODE: AppMode = process.env.APP_MODE === "headless" ? "headless" : "full";
 const IS_FULL_MODE = APP_MODE === "full";
 
@@ -455,6 +466,33 @@ interface PolymarketCreds {
   key: string; secret: string; passphrase: string; address: string;
 }
 
+function normalizeBuilderCode(raw: string): `0x${string}` | null {
+  const code = raw.trim();
+  if (!code) return null;
+  if (/^0x[0-9a-fA-F]{64}$/.test(code)) return code as `0x${string}`;
+  if (ethers.isAddress(code)) {
+    return `0x${code.toLowerCase().slice(2).padStart(64, "0")}` as `0x${string}`;
+  }
+  return null;
+}
+
+function buildBuilderConfig(): { builderConfig?: { builderAddress: string; builderCode: `0x${string}` } } {
+  const builderCode = normalizeBuilderCode(POLY_BUILDER_CODE);
+  if (!builderCode) return {};
+  const fallback = PROXY_ADDRESS || "";
+  const builderAddress = POLY_BUILDER_ADDRESS.trim() || fallback;
+  if (!builderAddress || !ethers.isAddress(builderAddress)) {
+    console.warn("[Builder] POLY_BUILDER_CODE 已配置但 builderAddress 无效，忽略 builder 配置。");
+    return {};
+  }
+  return {
+    builderConfig: {
+      builderAddress,
+      builderCode,
+    },
+  };
+}
+
 function adaptSigner(wallet: ethers.Wallet) {
   return {
     _signTypedData: (
@@ -483,14 +521,15 @@ async function createClobClient(): Promise<ClobClient | null> {
   const sigType = PROXY_ADDRESS ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA;
   const funderAddress = PROXY_ADDRESS || undefined;
   const saved   = loadCreds();
+  const builderOpts = buildBuilderConfig();
 
   if (saved) {
     const creds = { key: saved.key, secret: saved.secret, passphrase: saved.passphrase };
     if (PRIVATE_KEY) {
       const signer = adaptSigner(new ethers.Wallet(PRIVATE_KEY)) as any;
-      return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
+      return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress, ...builderOpts });
     }
-    return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, creds, signatureType: sigType, funderAddress });
+    return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, creds, signatureType: sigType, funderAddress, ...builderOpts });
   }
 
   if (!PRIVATE_KEY) {
@@ -501,11 +540,11 @@ async function createClobClient(): Promise<ClobClient | null> {
   console.log("[Auth] 首次使用，通过私钥生成 Polymarket API 凭证...");
   const wallet = new ethers.Wallet(PRIVATE_KEY);
   const signer = adaptSigner(wallet) as any;
-  const client = new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, signatureType: sigType, funderAddress });
+  const client = new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, signatureType: sigType, funderAddress, ...builderOpts });
   const creds  = await client.createOrDeriveApiKey();
   writeFileSync(CREDS_FILE, JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase, address: wallet.address }, null, 2));
   console.log("[Auth] 凭证已保存到 .polymarket-creds.json");
-  return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
+  return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress, ...builderOpts });
 }
 
 // ── HTTP 服务 ─────────────────────────────────────────────────
@@ -1906,6 +1945,61 @@ async function autoClaimCycle(): Promise<void> {
 let claimInProgress = false;
 let safeClaimSupport: boolean | null = null;
 const POLY_PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
+let relayClient: RelayClient | null = null;
+let relayClientInitTried = false;
+
+function hasRelayerCreds(): boolean {
+  return !!(POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE);
+}
+
+function getOrCreateRelayClient(): RelayClient | null {
+  if (relayClient) return relayClient;
+  if (!PRIVATE_KEY || !hasRelayerCreds()) return null;
+  if (relayClientInitTried) return null;
+  relayClientInitTried = true;
+  try {
+    const privateKey = (PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : `0x${PRIVATE_KEY}`) as Hex;
+    const account = privateKeyToAccount(privateKey);
+    const wallet = createWalletClient({
+      account,
+      chain: polygon,
+      transport: http("https://polygon-bor-rpc.publicnode.com", { timeout: 30_000 }),
+    });
+    const builderConfig = new BuilderConfig({
+      localBuilderCreds: {
+        key: POLY_BUILDER_API_KEY,
+        secret: POLY_BUILDER_SECRET,
+        passphrase: POLY_BUILDER_PASSPHRASE,
+      },
+    }) as any;
+    relayClient = new RelayClient(
+      "https://relayer-v2.polymarket.com/",
+      137,
+      wallet,
+      builderConfig,
+      RelayerTxType.PROXY,
+    );
+    console.log("[Claim] Relayer 客户端初始化成功，Claim 将优先走 gasless。");
+    return relayClient;
+  } catch (err) {
+    console.error(`[Claim] Relayer 客户端初始化失败，回退链上直发: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+async function tryGaslessRedeemBatch(
+  client: RelayClient,
+  calls: { to: `0x${string}`; data: `0x${string}`; value: "0" }[],
+): Promise<string> {
+  const response: any = await client.execute(calls, `Web Claim ${calls.length} positions`);
+  const txId = response?.hash ?? response?.transactionID ?? "";
+  const receipt = await response.wait();
+  const state = String(receipt?.state ?? "");
+  if (state === "STATE_CONFIRMED" || state === "STATE_MINED") {
+    return txId;
+  }
+  throw new Error(`Relayer 状态异常: ${state || "unknown"}`);
+}
 
 async function detectSafeClaimSupport(
   provider: ethers.Provider,
@@ -1971,6 +2065,7 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
   ]);
   const safe = new ethers.Contract(PROXY_ADDRESS, safeIface, wallet);
   const proxyFactory = new ethers.Contract(POLY_PROXY_FACTORY_ADDRESS, proxyFactoryIface, wallet);
+  const relayer = getOrCreateRelayClient();
 
   if (safeClaimSupport == null) {
     safeClaimSupport = await detectSafeClaimSupport(provider, PROXY_ADDRESS);
@@ -2000,6 +2095,16 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
         const calldata = ctfIface.encodeFunctionData("redeemPositions", [
           USDC_ADDR, ZERO_BYTES32, p.conditionId, [1, 2]
         ]);
+        if (relayer) {
+          console.log("[Claim] 发送 Relayer(gasless) 交易...");
+          const txHash = await tryGaslessRedeemBatch(relayer, [
+            { to: CTF as `0x${string}`, data: calldata as `0x${string}`, value: "0" },
+          ]);
+          console.log(`[Claim] ✓ 成功 ${p.title} → ${txHash || "(relayer id unavailable)"}`);
+          results.push({ title: p.title, txHash: txHash || undefined });
+          broadcast("claimProgress", { current: i + 1, total, title: p.title, status: "success" });
+          continue;
+        }
         let tx: ethers.TransactionResponse;
         if (claimMode === "safe") {
           const nonce = await safe.nonce();

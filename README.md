@@ -75,6 +75,8 @@ cp .env.example .env
 - `STRATEGY_S{1..5}_ENABLED` / `STRATEGY_S{1..5}_AMOUNT` — 策略开关和金额
 - `ORDER_DEFAULT_SLIPPAGE` — 默认滑点
 - `AUTO_CLAIM_ENABLED` — 自动领取到期仓位
+- `POLY_BUILDER_API_KEY` / `POLY_BUILDER_SECRET` / `POLY_BUILDER_PASSPHRASE` — Claim 走 relayer gasless（推荐）
+- `POLY_BUILDER_CODE` / `POLY_BUILDER_ADDRESS` — 下单 builder attribution（可选；不填则不附带 builder_code）
 
 ### 启动
 
