@@ -518,7 +518,13 @@ function loadCreds(): PolymarketCreds | null {
 }
 
 async function createClobClient(): Promise<ClobClient | null> {
-  const sigType = PROXY_ADDRESS ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA;
+  let sigType = SignatureType.EOA;
+  if (PROXY_ADDRESS) {
+    const provider = new ethers.JsonRpcProvider("https://polygon-bor-rpc.publicnode.com", 137, { staticNetwork: true });
+    const isSafe = await detectSafeClaimSupport(provider, PROXY_ADDRESS);
+    sigType = isSafe ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.POLY_PROXY;
+    console.log(`[Auth] 使用 signatureType=${isSafe ? "POLY_GNOSIS_SAFE" : "POLY_PROXY"}`);
+  }
   const funderAddress = PROXY_ADDRESS || undefined;
   const saved   = loadCreds();
   const builderOpts = buildBuilderConfig();
