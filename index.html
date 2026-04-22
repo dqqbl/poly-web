@@ -117,12 +117,6 @@ body {
   display: flex; align-items: center; gap: 32px;
   border-bottom: 1px solid #21262d;
 }
-#price-bar #signal-box {
-  margin-left: auto;
-  min-width: 220px;
-  min-height: 44px;
-  padding: 8px 14px;
-}
 #compact-overview {
   display: none;
   padding: 12px 20px 0;
@@ -157,29 +151,6 @@ body {
   color: #888;
   line-height: 1.5;
 }
-.sig-info-icon {
-  position: relative; display: inline-block;
-  color: #555; font-size: 11px; cursor: default;
-  margin-left: 4px; vertical-align: middle;
-}
-.sig-tooltip {
-  display: none; position: absolute;
-  top: calc(100% + 6px); right: 0;
-  background: #1c2128; border: 1px solid #30363d;
-  border-radius: 6px; padding: 8px 10px;
-  white-space: nowrap; z-index: 100;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-}
-.sig-info-icon:hover .sig-tooltip { display: flex; flex-direction: column; gap: 5px; }
-.sig-cfg-row {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: #aaa;
-}
-.sig-cfg-tag {
-  font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 3px;
-}
-.sig-cfg-tag.finale { background: #2a1200; color: #ff8c00; }
-.sig-cfg-tag.open   { background: #0d1f33; color: #4e9eff; }
 .price-item { display: flex; flex-direction: column; gap: 2px; }
 .price-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; }
 .price-val { font-size: 22px; font-weight: 700; }
@@ -224,7 +195,18 @@ body.low-data-mode { background: #0a0e13; }
 body.low-data-mode #vol-box,
 body.low-data-mode #main-wrap,
 body.low-data-mode #compact-overview {
-  display: none;
+  display: none !important;
+}
+
+/* 低数据模式：observe-bar 保留展示策略观察值 */
+body.low-data-mode #observe-bar {
+  width: min(920px, calc(100% - 24px));
+  margin: 8px auto 0;
+  background: #11151b;
+  border: 1px solid #1a1f28;
+  border-radius: 14px;
+  padding: 10px 14px;
+  font-size: 11px;
 }
 
 body.low-data-mode #header,
@@ -257,8 +239,6 @@ body.low-data-mode #price-bar {
   flex-direction: column;
   margin-top: 4px;
 }
-body.low-data-mode #price-bar #signal-box { display: none; }
-
 /* 第一行：概率 + 倒计时（大字焦点） */
 body.low-data-mode #price-bar .price-item:nth-child(1),
 body.low-data-mode #price-bar .price-item:nth-child(2) {
@@ -301,13 +281,25 @@ body.low-data-mode #strat-bar #strat-scan-info { font-size: 12px; color: #6a7380
 body.low-data-mode #strat-bar .strat-right {
   width: 100%;
   margin-left: 0;
-  justify-content: space-between;
+  align-items: stretch !important;
   padding-top: 8px;
   border-top: 1px solid #1a1f28;
+  gap: 8px !important;
+}
+body.low-data-mode #strat-bar .strat-right > div {
+  flex-wrap: wrap;
+  justify-content: flex-start !important;
 }
 body.low-data-mode #strat-bar .strat-divider { display: none; }
 body.low-data-mode #claim-bar { align-items: flex-start !important; }
 body.low-data-mode #claim-status { max-width: none !important; text-align: left !important; }
+
+/* 低数据模式下策略分类行：标签 + 开关 紧凑 */
+body.low-data-mode .strat-row {
+  padding: 2px 0;
+  border-bottom: 1px solid #1a1f28;
+}
+body.low-data-mode .strat-row:last-child { border-bottom: none; }
 
 /* ── 交易记录 ── */
 body.low-data-mode #signal-history {
@@ -419,39 +411,6 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
   border-radius: 3px; transition: width 0.3s ease;
 }
 
-/* ── 机会提示 ── */
-#signal-box {
-  border-radius: 8px;
-  padding: 12px 14px;
-  background: #161b22;
-  border: 1px solid #21262d;
-  min-height: 52px;
-  display: flex; align-items: center;
-  transition: all 0.3s;
-}
-#signal-box .sig-label {
-  font-size: 10px; color: #555; text-transform: uppercase;
-  letter-spacing: 0.5px; margin-bottom: 4px;
-}
-#signal-box .sig-text {
-  font-size: 13px; font-weight: 700; color: #444;
-}
-#signal-box.open {
-  background: #0d1f33; border-color: #4e9eff;
-}
-#signal-box.open .sig-text { color: #4e9eff; }
-#signal-box.finale {
-  background: #2a1200; border-color: #ff8c00;
-  animation: pulse 0.8s infinite;
-}
-#signal-box.finale .sig-text { color: #ff8c00; }
-#signal-reset-btn {
-  background: #21262d; color: #aaa; border: 1px solid #30363d;
-  border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600;
-  cursor: pointer; white-space: nowrap; transition: all 0.2s;
-}
-#signal-reset-btn:hover { background: #30363d; color: #e0e0e0; }
-
 /* ── 买卖记录栏 ── */
 #signal-history {
   background: #0d1117;
@@ -488,6 +447,121 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
   text-overflow: ellipsis;
 }
 .hist-item .hist-pnl { font-weight: 700; }
+
+/* ── Polymarket 真实盈亏 ── */
+#pm-pnl {
+  background: #0d1117;
+  border-top: 1px solid #21262d;
+  padding: 8px 16px 10px;
+}
+#pm-pnl .hist-title {
+  font-size: 11px; color: #555; text-transform: uppercase;
+  letter-spacing: 0.5px; margin-bottom: 6px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+#pm-pnl .pm-total {
+  font-size: 11px; color: #888; font-weight: normal; text-transform: none; letter-spacing: normal;
+}
+#pm-pnl .pm-total .val-pos { color: #3fb950; font-weight: 700; }
+#pm-pnl .pm-total .val-neg { color: #f85149; font-weight: 700; }
+#pm-pnl-tabs {
+  display: flex; gap: 4px; margin-bottom: 6px;
+}
+.pm-tab {
+  background: #161b22; color: #8b949e;
+  border: 1px solid #21262d; border-radius: 4px;
+  padding: 3px 10px; font-size: 11px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.pm-tab:hover { background: #21262d; color: #c9d1d9; }
+.pm-tab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+#pm-pnl-list {
+  display: flex; flex-direction: column; gap: 3px;
+  height: 420px; overflow-y: auto;
+  padding-right: 2px;
+}
+.pm-item {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: #888;
+  padding: 4px 8px; border-radius: 4px;
+  background: #161b22;
+}
+/* 表头：共用 pm-item 列宽，但样式不同（无背景、小字、大写字母间距） */
+.pm-header {
+  background: transparent !important;
+  color: #6e7681;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 3px 8px 4px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid #21262d;
+  border-radius: 0;
+}
+.pm-header > span {
+  color: #6e7681 !important;
+  background: transparent !important;
+  font-weight: 600 !important;
+  font-size: 10px !important;
+  padding: 0 !important;
+  min-width: auto;
+}
+/* 表头列宽对齐行，所有列统一居中（便于阅读） */
+.pm-header .pm-time { width: 78px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-kind { width: 36px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-outcome { width: 32px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-source { width: 28px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-detail { width: 105px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-fee { width: 48px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-title { flex: 1; min-width: 0; text-align: center !important; }
+.pm-header .pm-amount { width: 110px; flex-shrink: 0; text-align: center !important; }
+.pm-header .pm-pos-pnl { width: 96px; flex-shrink: 0; text-align: center !important; }
+.pm-item .pm-time { color: #555; width: 78px; flex-shrink: 0; font-size: 10px; }
+.pm-item .pm-kind { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; width: 36px; flex-shrink: 0; text-align: center; box-sizing: border-box; }
+.pm-item .pm-kind.buy { background: #10261a; color: #3fb950; }
+.pm-item .pm-kind.sell { background: #2a1712; color: #f85149; }
+.pm-item .pm-kind.claim { background: #1f2a0d; color: #f0a500; }
+.pm-item .pm-kind.lost { background: #2a1712; color: #8b949e; }
+.pm-item .pm-outcome { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; width: 32px; flex-shrink: 0; text-align: center; box-sizing: border-box; }
+.pm-item .pm-outcome.up { background: #10261a; color: #3fb950; }
+.pm-item .pm-outcome.down { background: #2a1712; color: #f85149; }
+.pm-item .pm-source { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #0d1f33; color: #7cc8ff; width: 28px; flex-shrink: 0; text-align: center; box-sizing: border-box; }
+.pm-item .pm-source.manual { background: #2a1200; color: #ffb347; }
+/* 细节：size × price */
+.pm-item .pm-detail {
+  color: #6e7681; font-size: 10px;
+  width: 105px; flex-shrink: 0;
+}
+/* 手续费独立列 */
+.pm-item .pm-fee {
+  color: #f0a500; font-size: 10px;
+  width: 48px; flex-shrink: 0; text-align: right;
+}
+.pm-item .pm-fee .dim { color: #444; }
+/* 市场标题 - 弹性占空间 */
+.pm-item .pm-title {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: #8b949e; font-size: 10px;
+}
+/* 现金流（支出/收入/领取） */
+.pm-item .pm-amount {
+  width: 110px; flex-shrink: 0; text-align: right;
+  font-size: 11px;
+}
+.pm-item .pm-amount .pm-amount-label { color: #6e7681; font-size: 10px; margin-right: 4px; }
+.pm-item .pm-amount .pm-amount-val { font-weight: 700; }
+.pm-item .pm-amount .pm-amount-val.pos { color: #3fb950; }
+.pm-item .pm-amount .pm-amount-val.neg { color: #f85149; }
+/* 仓位盈亏 */
+.pm-item .pm-pos-pnl {
+  width: 96px; flex-shrink: 0; text-align: right;
+  font-size: 11px;
+}
+.pm-item .pm-pos-pnl .pm-pos-pnl-label { color: #6e7681; font-size: 10px; margin-right: 4px; }
+.pm-item .pm-pos-pnl .pm-pos-pnl-val { font-weight: 700; }
+.pm-item .pm-pos-pnl .pm-pos-pnl-val.pos { color: #3fb950; }
+.pm-item .pm-pos-pnl .pm-pos-pnl-val.neg { color: #f85149; }
+.pm-item .pm-pos-pnl .pm-pos-pnl-val.dim { color: #444; font-weight: 400; }
 
 /* ── 价格曲线 ── */
 #price-chart {
@@ -630,8 +704,8 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 #strat-bar {
   background: #161b22;
   border-bottom: 1px solid #21262d;
-  padding: 7px 20px;
-  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 8px 20px;
+  display: flex; align-items: flex-start; gap: 20px; flex-wrap: wrap;
   font-size: 12px;
 }
 .strat-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
@@ -653,6 +727,15 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
   width: 40px; background: #0d1117; border: 1px solid #333;
   color: #ccc; font-size: 11px; padding: 1px 3px; border-radius: 3px; text-align: center;
 }
+/* 隐藏策略栏相关数字输入框的上下箭头 */
+.strat-amt::-webkit-inner-spin-button,
+.strat-amt::-webkit-outer-spin-button,
+#max-round-entries::-webkit-inner-spin-button,
+#max-round-entries::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.strat-amt, #max-round-entries { -moz-appearance: textfield; }
 #strat-status { display: flex; align-items: center; gap: 8px; }
 #strat-state-text { font-size: 12px; font-weight: 600; color: #f0a500; }
 #strat-state-text.idle   { color: #555; }
@@ -665,13 +748,19 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
   position: relative; display: inline-flex; align-items: center;
 }
 .strat-tip .tip-box {
-  display: none; position: absolute; top: calc(100% + 6px); left: 0;
+  display: none; position: absolute; top: 100%; left: 0; margin-top: 6px;
   background: #1c2128; border: 1px solid #30363d; border-radius: 6px;
   padding: 8px 10px; font-size: 11px; color: #ccc; line-height: 1.6;
-  white-space: nowrap; z-index: 100; pointer-events: none;
+  white-space: nowrap; z-index: 100;
   box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  user-select: text; cursor: text;
 }
-.strat-tip:hover .tip-box { display: block; }
+/* 桥接区域：消除标签和 tip-box 之间的 6px 间隙，防止鼠标穿过时触发隐藏 */
+.strat-tip .tip-box::before {
+  content: ""; position: absolute; top: -6px; left: 0; right: 0; height: 6px;
+}
+.strat-tip:hover .tip-box,
+.strat-tip .tip-box:hover { display: block; }
 </style>
 </head>
 <body>
@@ -691,10 +780,24 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     <div class="ws-light" id="ws-chainlink"><div class="dot"></div>价格</div>
     <div class="ws-light" id="ws-user"><div class="dot"></div>账户</div>
     <div class="ws-light" id="ws-binance"><div class="dot"></div>币安</div>
+    <div id="kline-status" style="font-size:10px;color:#666;margin-left:4px" title="Binance K 线缓存数量（1分钟/5分钟）">K线 1m:<span id="kline-1m-count">—</span> 5m:<span id="kline-5m-count">—</span></div>
   </div>
-  <div class="mode-toggle" title="低数据模式下只保留简版信息，并改为服务端节流推送">
+  <div class="mode-toggle" title="低数据模式下只保留简版信息，并改为服务端节流推送" style="margin-left:auto">
     <span class="mode-toggle-label">低数据</span>
     <button id="low-data-toggle" class="mode-toggle-btn" type="button" onclick="toggleLowDataMode()" aria-pressed="false"></button>
+  </div>
+</div>
+
+<!-- 观察面板：独立行，展示动量因子 / 概率追赶因子 -->
+<div id="observe-bar" style="padding:6px 16px;background:#0d1117;border-bottom:1px solid #1a1f28;font-size:11px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+  <div id="fair-prob-panel" style="color:#888;white-space:nowrap" title="s5 概率追赶策略：当前 Polymarket 概率 vs 历史合理概率 的偏差，偏差≥10% 触发入场">
+    <span style="color:#f0a500;font-weight:600">概率追赶</span>
+    <span style="color:#444;margin:0 6px">|</span>
+    <span id="fp-input">—</span>
+    <span style="color:#444;margin:0 6px">|</span>
+    <span id="fp-compare">—</span>
+    <span style="color:#444;margin:0 6px">|</span>
+    <span id="fp-bias">偏差 —</span>
   </div>
 </div>
 
@@ -745,21 +848,6 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     <span id="ldh-strat" style="font-weight:600;color:#555">—</span>
   </div>
 
-  <!-- 机会提示（price-bar 右侧） -->
-  <div id="signal-box">
-    <div style="flex:1">
-      <div class="sig-label">机会提示
-        <span class="sig-info-icon">ⓘ
-          <div class="sig-tooltip">
-            <div class="sig-cfg-row"><span class="sig-cfg-tag open">开盘</span><span>开盘1分钟内 · 差价 ±50 · 概率 &lt;30%</span></div>
-            <div class="sig-cfg-row"><span class="sig-cfg-tag finale">扫尾</span><span>最后15秒 · 差价 ±5 · 概率 &lt;5%</span></div>
-          </div>
-        </span>
-      </div>
-      <div class="sig-text" id="signal-text">暂无信号</div>
-    </div>
-    <button id="signal-reset-btn" onclick="resetSignal()" style="display:none">重置</button>
-  </div>
 </div>
 
 <div id="compact-overview">
@@ -789,26 +877,26 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 
 <!-- 策略栏 -->
 <div id="strat-bar">
-  <div id="strat-groups" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap"></div>
-  <div class="strat-right">
-    <div id="strat-status">
-      <span id="strat-scan-info" style="font-size:11px;color:#555">—</span>
-      <span id="strat-state-text" class="idle">未启用</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:4px;font-size:11px;color:#888">
-      <span>单局</span>
-      <input type="number" id="max-round-entries" value="1" min="1" max="10" step="1" style="width:36px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e0e0e0;text-align:center;font-size:11px;padding:2px" title="单局最大入场次数">
-      <span>次</span>
-    </div>
-    <span id="strat-config-note" style="font-size:11px;color:#555">仅本次运行生效</span>
-    <div class="strat-divider"></div>
-    <div id="claim-bar" style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
-      <div style="display:flex;align-items:center;gap:6px">
-        <span id="claim-label" style="font-size:11px;color:#f0a500">待领取 <b id="claim-amount">—</b> <span id="claim-count" style="color:#888;font-weight:400"></span></span>
-        <span id="claim-cooldown" style="font-size:11px;color:#666;display:inline-block;min-width:48px;text-align:right;font-variant-numeric:tabular-nums"></span>
-        <button id="claim-btn" onclick="submitClaim()" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:5px;border:1px solid #f0a500;background:#2a1f00;color:#f0a500;cursor:pointer">Claim</button>
+  <div id="strat-groups" style="display:flex;flex-direction:column;gap:6px;flex:1"></div>
+  <div class="strat-right" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+    <!-- 第 1 行：状态 + 运行配置 -->
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="strat-status">
+        <span id="strat-scan-info" style="font-size:11px;color:#555">—</span>
+        <span id="strat-state-text" class="idle">未启用</span>
       </div>
-      <span id="claim-status" style="font-size:11px;color:#888;max-width:160px;text-align:right;word-break:break-all"></span>
+      <div class="strat-divider"></div>
+      <div style="display:flex;align-items:center;gap:4px;font-size:11px;color:#888" title="单局最大入场次数">
+        <span>单局</span>
+        <input type="number" id="max-round-entries" value="1" min="1" max="10" step="1" style="width:36px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e0e0e0;text-align:center;font-size:11px;padding:2px">
+        <span>次</span>
+      </div>
+      <span id="strat-config-note" style="font-size:11px;color:#555" title="策略配置只在本次运行中生效，重启后恢复 .env 默认值">ⓘ</span>
+    </div>
+    <!-- Claim 提示：引导用户到 Polymarket 官网开启自动 Claim -->
+    <div id="claim-tip" style="display:flex;align-items:center;gap:6px;font-size:11px;color:#666">
+      <span style="color:#f0a500">ⓘ</span>
+      <span>自动 Claim 请在 <a href="https://polymarket.com/settings" target="_blank" style="color:#f0a500;text-decoration:none">Polymarket 官网 Settings</a> 中开启（Auto Redeem），无需本地配置</span>
     </div>
     <div class="strat-divider"></div>
     <div style="display:flex;align-items:center;gap:6px">
@@ -832,11 +920,11 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
       </div>
     </div>
 
-    <div id="book-toggle" onclick="toggleBook()">
+    <div id="book-toggle" class="collapsed" onclick="toggleBook()">
       <span class="toggle-label">盘口</span>
       <span class="toggle-arrow">▼</span>
     </div>
-    <div id="book-collapsible">
+    <div id="book-collapsible" class="collapsed">
       <div id="momentum-bar">
         <div class="mom-group">
           <span class="mom-label">3s:</span>
@@ -970,10 +1058,34 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 
 </div>
 
-<!-- 买卖记录栏 -->
-<div id="signal-history">
+<!-- 买卖记录栏（已由下方「真实盈亏 · Polymarket」替代，保留 DOM 以兼容现有逻辑，隐藏显示） -->
+<div id="signal-history" style="display:none">
   <div class="hist-title">买卖记录</div>
   <div id="signal-history-list"><div style="color:#444;font-size:12px">暂无记录</div></div>
+</div>
+
+<!-- Polymarket 真实盈亏（每笔一行，含手续费和 Claim）-->
+<div id="pm-pnl">
+  <div class="hist-title">
+    <span>真实盈亏 · Polymarket</span>
+    <span class="pm-total" id="pm-pnl-total">加载中...</span>
+  </div>
+  <div id="pm-pnl-tabs">
+    <button class="pm-tab active" data-range="today">今日</button>
+    <button class="pm-tab" data-range="week">本周</button>
+  </div>
+  <div id="pm-pnl-header" class="pm-item pm-header">
+    <span class="pm-time">时间</span>
+    <span class="pm-kind">类型</span>
+    <span class="pm-outcome">方向</span>
+    <span class="pm-source">策略</span>
+    <span class="pm-detail">份额 × 价格</span>
+    <span class="pm-fee">手续费</span>
+    <span class="pm-title">市场</span>
+    <span class="pm-amount">现金流</span>
+    <span class="pm-pos-pnl">仓位盈亏</span>
+  </div>
+  <div id="pm-pnl-list"><div style="color:#444;font-size:12px">加载中...</div></div>
 </div>
 
 <script>
@@ -1030,9 +1142,6 @@ const $orderDiff      = document.getElementById('order-diff');
 const $bestBid    = document.getElementById('best-bid');
 const $bestAsk    = document.getElementById('best-ask');
 const $spreadVal  = document.getElementById('spread-val');
-const $signalBox  = document.getElementById('signal-box');
-const $signalText = document.getElementById('signal-text');
-const $signalResetBtn = document.getElementById('signal-reset-btn');
 const $signalHistoryList = document.getElementById('signal-history-list');
 const $lowDataToggle = document.getElementById('low-data-toggle');
 const $compactProbMain = document.getElementById('compact-prob-main');
@@ -1200,6 +1309,171 @@ function renderTradeHistory() {
 renderTradeHistory();
 updateLowDataToggleUi();
 
+// ── Polymarket 真实盈亏 ──────────────────────────────────────
+const $pmPnlList = document.getElementById('pm-pnl-list');
+const $pmPnlTotal = document.getElementById('pm-pnl-total');
+
+// 本地缓存最近一次拉到的全量 events，切换 range 时重渲染
+let pmEventsAll = [];
+let pmRange = 'today';  // today / week / month / all
+
+function formatPmTime(tsSec) {
+  return new Date(tsSec * 1000).toLocaleString([], {
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+    hour12: false,
+  });
+}
+
+/** 返回 range 对应的起始时间戳（秒）*/
+function rangeStartSec(range) {
+  const now = new Date();
+  if (range === 'today') {
+    now.setHours(0, 0, 0, 0);
+  } else if (range === 'week') {
+    // 本周一 00:00（周一为一周开始）
+    const dow = now.getDay() || 7;  // 周日=0 转成 7
+    now.setDate(now.getDate() - (dow - 1));
+    now.setHours(0, 0, 0, 0);
+  } else if (range === 'month') {
+    now.setDate(1);
+    now.setHours(0, 0, 0, 0);
+  } else if (range === '30d') {
+    return Math.floor(Date.now() / 1000) - 30 * 86400;
+  } else {
+    return 0;
+  }
+  return Math.floor(now.getTime() / 1000);
+}
+
+/** 在给定 events 上重算总览（按 cost 和 fee 分类汇总）*/
+function recalcTotal(events) {
+  let buyCost = 0, sellRev = 0, redeemRev = 0, fee = 0;
+  const txSet = new Set();
+  for (const e of events) {
+    if (e.kind === 'BUY') buyCost += e.cost;
+    else if (e.kind === 'SELL') sellRev += e.cost;
+    else if (e.kind === 'REDEEM') redeemRev += e.cost;
+    // LOST 不产生现金流（钱在 BUY 时已扣）和手续费
+    fee += (e.fee || 0);
+    // LOST 是合成事件，不计笔数（BUY 已经算过了）
+    if (e.transactionHash && e.kind !== 'LOST') txSet.add(e.transactionHash + ':' + e.kind);
+  }
+  return {
+    positionCount: txSet.size,
+    totalFee: fee,
+    netPnl: sellRev + redeemRev - buyCost - fee,
+  };
+}
+
+function renderPmPnl(events, total) {
+  if (Array.isArray(events)) pmEventsAll = events;
+  applyPmPnlFilter();
+}
+
+function applyPmPnlFilter() {
+  const start = rangeStartSec(pmRange);
+  const filtered = pmEventsAll.filter(e => e.ts >= start);
+  const localTotal = recalcTotal(filtered);
+
+  if ($pmPnlTotal) {
+    const net = Number(localTotal.netPnl || 0);
+    const cls = net >= 0 ? 'val-pos' : 'val-neg';
+    const sign = net >= 0 ? '+' : '';
+    const feeText = Number(localTotal.totalFee || 0).toFixed(2);
+    const cntText = localTotal.positionCount || 0;
+    $pmPnlTotal.innerHTML = `${cntText}笔 · 费$${feeText} · 净<span class="${cls}">${sign}$${net.toFixed(2)}</span>`;
+  }
+  if (!$pmPnlList) return;
+  if (filtered.length === 0) {
+    $pmPnlList.innerHTML = '<div style="color:#444;font-size:12px">该时段无记录</div>';
+    return;
+  }
+  renderPmPnlList(filtered);
+}
+
+// 绑定 tab 切换
+document.querySelectorAll('.pm-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.pm-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    pmRange = btn.dataset.range;
+    applyPmPnlFilter();
+  });
+});
+
+function renderPmPnlList(events) {
+  $pmPnlList.innerHTML = events.map((e) => {
+    const outcome = (e.outcome || '').toLowerCase();
+    const outcomeText = outcome === 'up' ? '涨▲' : outcome === 'down' ? '跌▼' : e.outcome;
+    const kindLabel = e.kind === 'BUY' ? '买入' : e.kind === 'SELL' ? '卖出' : e.kind === 'REDEEM' ? '领取' : '归零';
+    const kindCls = e.kind === 'BUY' ? 'buy' : e.kind === 'SELL' ? 'sell' : e.kind === 'REDEEM' ? 'claim' : 'lost';
+    const timeText = formatPmTime(e.ts);
+    const titleShort = (e.title || '').replace('Bitcoin Up or Down - ', '');
+
+    // 策略来源徽章（没有则占位以保持列对齐）
+    let sourceBadge;
+    if (e.strategySource) {
+      const isManual = e.strategySource === 'manual';
+      const srcText = isManual ? '手动' : e.strategySource.replace(/^strategy/i, 's').toUpperCase();
+      sourceBadge = `<span class="pm-source ${isManual ? 'manual' : ''}">${srcText}</span>`;
+    } else {
+      sourceBadge = `<span class="pm-source" style="visibility:hidden">—</span>`;
+    }
+
+    // 详细信息（交易参数）
+    let detailHtml = '';
+    if (e.kind === 'REDEEM') {
+      detailHtml = `${(e.size).toFixed(2)}份 × 100%`;
+    } else if (e.kind === 'LOST') {
+      detailHtml = `${(e.size).toFixed(2)}份 × 0%`;
+    } else {
+      detailHtml = `${(e.size).toFixed(2)}份 × ${(e.price * 100).toFixed(1)}%`;
+    }
+    // 手续费独立列
+    const feeVal = Number(e.fee || 0);
+    const feeHtml = feeVal > 0
+      ? `$${feeVal.toFixed(2)}`
+      : `<span class="dim">—</span>`;
+
+    // 右侧现金流（带标签）
+    const net = Number(e.netAmount || 0);
+    const amountLabel = e.kind === 'BUY' ? '支出' : e.kind === 'SELL' ? '收入' : e.kind === 'REDEEM' ? '领取' : '归零';
+    let amountHtml;
+    if (e.kind === 'LOST') {
+      // LOST 不产生现金流（钱在 BUY 时已扣），显示 "归零 $0.00"（灰）
+      amountHtml = `<span class="pm-amount-label">${amountLabel}</span><span class="pm-amount-val" style="color:#555">$0.00</span>`;
+    } else {
+      const amountCls = net >= 0 ? 'pos' : 'neg';
+      const amountSign = net >= 0 ? '+' : '';
+      amountHtml = `<span class="pm-amount-label">${amountLabel}</span><span class="pm-amount-val ${amountCls}">${amountSign}$${net.toFixed(2)}</span>`;
+    }
+
+    // 仓位盈亏（SELL/REDEEM/LOST 显示真实值，BUY 显示占位符保持列对齐）
+    let posPnlHtml;
+    if (e.positionPnl != null && (e.kind === 'SELL' || e.kind === 'REDEEM' || e.kind === 'LOST')) {
+      const p = Number(e.positionPnl);
+      const cls = p >= 0 ? 'pos' : 'neg';
+      const sign = p >= 0 ? '+' : '';
+      posPnlHtml = `<span class="pm-pos-pnl-label">仓位</span><span class="pm-pos-pnl-val ${cls}">${sign}$${p.toFixed(2)}</span>`;
+    } else {
+      posPnlHtml = `<span class="pm-pos-pnl-label">仓位</span><span class="pm-pos-pnl-val dim">—</span>`;
+    }
+
+    return `<div class="pm-item">
+      <span class="pm-time">${timeText}</span>
+      <span class="pm-kind ${kindCls}">${kindLabel}</span>
+      <span class="pm-outcome ${outcome}">${outcomeText}</span>
+      ${sourceBadge}
+      <span class="pm-detail">${detailHtml}</span>
+      <span class="pm-fee">${feeHtml}</span>
+      <span class="pm-title">${titleShort}</span>
+      <span class="pm-amount">${amountHtml}</span>
+      <span class="pm-pos-pnl">${posPnlHtml}</span>
+    </div>`;
+  }).join('');
+}
+
 
 const $mom5Poly   = document.getElementById('mom5-poly');
 const $mom5Bnb    = document.getElementById('mom5-bnb');
@@ -1345,6 +1619,10 @@ const strat = {
 const stratEnabled = {};
 const stratAmount  = {};
 let maxRoundEntries = 1;
+let marketHoursOnly = false;
+let autoClaimEnabled = false;
+const $marketHoursOnly = document.getElementById('market-hours-only');
+const $autoClaimEnabled = document.getElementById('auto-claim-enabled');
 const $maxRoundEntries = document.getElementById('max-round-entries');
 const UNVERIFIED_SELL_BUFFER = 0.05;
 const STRAT_BUY_LOCK_MS = 15000;
@@ -1356,7 +1634,7 @@ let _pendingStrategyConfig = null;
 function fmtSize(n) { return (Math.floor(n * 100) / 100).toFixed(2); }
 updateCompactOverview();
 
-function setStratConfigNote(text = '仅本次运行生效', color = '#555') {
+function setStratConfigNote(text = 'ⓘ', color = '#555') {
   if (!$stratConfigNote) return;
   $stratConfigNote.textContent = text;
   $stratConfigNote.style.color = color;
@@ -1368,18 +1646,77 @@ function setStratControlsDisabled(disabled) {
     if (stratAmtEls[key]) stratAmtEls[key].disabled = disabled;
   }
   if ($maxRoundEntries) $maxRoundEntries.disabled = disabled;
+  if ($marketHoursOnly) $marketHoursOnly.disabled = disabled;
+  if ($autoClaimEnabled) $autoClaimEnabled.disabled = disabled;
 }
 
+function updateFairProb(msg) {
+  const $wrap = document.getElementById('fair-prob-panel');
+  if (!$wrap) return;
+  $wrap.style.display = '';
+
+  const fp = msg && msg.fairProb;
+  if (!fp || fp.diff == null || fp.upPct == null) {
+    document.getElementById('fp-input').textContent = '—';
+    document.getElementById('fp-compare').textContent = '—';
+    document.getElementById('fp-bias').innerHTML = '<span style="color:#666">偏差 —</span>';
+    return;
+  }
+
+  const diffSign = fp.diff > 0 ? '+' : '';
+  document.getElementById('fp-input').innerHTML =
+    `<span style="color:#666">diff</span> <span style="color:#e0e0e0">${diffSign}${Math.round(fp.diff)}</span>` +
+    ` <span style="color:#666">rem</span> <span style="color:#e0e0e0">${fp.rem}s</span>`;
+
+  if (fp.fairUp == null) {
+    document.getElementById('fp-compare').innerHTML =
+      `<span style="color:#666">涨</span> <span style="color:#e0e0e0">${fp.upPct.toFixed(0)}%</span>` +
+      ` <span style="color:#444">→</span> <span style="color:#666">合理 —</span>`;
+    document.getElementById('fp-bias').innerHTML =
+      '<span style="color:#666">偏差 —</span> <span style="color:#666">·</span>';
+    return;
+  }
+
+  document.getElementById('fp-compare').innerHTML =
+    `<span style="color:#666">涨</span> <span style="color:#e0e0e0">${fp.upPct.toFixed(0)}%</span>` +
+    ` <span style="color:#444">→</span>` +
+    ` <span style="color:#666">合理</span> <span style="color:#58a6ff">${fp.fairUp}%</span>`;
+
+  const bias = fp.biasUp;
+  const absBias = Math.abs(bias);
+  let color = '#666', icon = '·';
+  if (bias < 0) { color = '#f85149'; icon = '✗'; }
+  else if (absBias >= 10) { color = '#3fb950'; icon = '✓'; }
+  else if (absBias >= 5) { color = '#f0a500'; icon = '○'; }
+  const sign = bias >= 0 ? '+' : '';
+  document.getElementById('fp-bias').innerHTML =
+    `<span style="color:#666">偏差</span>` +
+    ` <span style="color:${color};font-weight:600">${sign}${bias.toFixed(0)}</span>` +
+    ` <span style="color:${color}">${icon}</span>`;
+}
+
+// s6 动量因子面板已移除
+
 function applyStrategyConfig(config) {
+  const activeEl = document.activeElement;
   for (const key of strategyKeys) {
     stratEnabled[key] = !!config.enabled?.[key];
     stratAmount[key] = Number(config.amount?.[key]) || 1;
-    if (stratChkEls[key]) stratChkEls[key].checked = stratEnabled[key];
-    if (stratAmtEls[key]) stratAmtEls[key].value = String(stratAmount[key]);
+    // 用户正在聚焦某个输入框时不覆盖它的当前值
+    if (stratChkEls[key] && stratChkEls[key] !== activeEl) stratChkEls[key].checked = stratEnabled[key];
+    if (stratAmtEls[key] && stratAmtEls[key] !== activeEl) stratAmtEls[key].value = String(stratAmount[key]);
   }
   if (config.maxRoundEntries != null) {
     maxRoundEntries = Number(config.maxRoundEntries) || 1;
-    if ($maxRoundEntries) $maxRoundEntries.value = String(maxRoundEntries);
+    if ($maxRoundEntries && $maxRoundEntries !== activeEl) $maxRoundEntries.value = String(maxRoundEntries);
+  }
+  if (typeof config.marketHoursOnly === 'boolean') {
+    marketHoursOnly = config.marketHoursOnly;
+    if ($marketHoursOnly && $marketHoursOnly !== activeEl) $marketHoursOnly.checked = marketHoursOnly;
+  }
+  if (typeof config.autoClaimEnabled === 'boolean') {
+    autoClaimEnabled = config.autoClaimEnabled;
+    if ($autoClaimEnabled && $autoClaimEnabled !== activeEl) $autoClaimEnabled.checked = autoClaimEnabled;
   }
 }
 
@@ -1408,7 +1745,13 @@ async function saveStrategyConfigFromControls() {
     const res = await fetch('/api/strategy/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: nextEnabled, amount: nextAmount, maxRoundEntries: Number($maxRoundEntries?.value) || 1 }),
+      body: JSON.stringify({
+        enabled: nextEnabled,
+        amount: nextAmount,
+        maxRoundEntries: Number($maxRoundEntries?.value) || 1,
+        marketHoursOnly: !!$marketHoursOnly?.checked,
+        autoClaimEnabled: !!$autoClaimEnabled?.checked,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1473,21 +1816,7 @@ setInterval(() => {
     }
   }
 
-  const $claimCd = document.getElementById('claim-cooldown');
-  const $claimLabel = document.getElementById('claim-label');
-  if ($claimCd) {
-    if (_claimCooldownRunning) {
-      $claimCd.textContent = '更新中...';
-    } else if (_claimNextCheckAt > 0) {
-      const rem = Math.ceil((_claimNextCheckAt - Date.now()) / 1000);
-      $claimCd.textContent = rem > 0 ? `${rem}s后更新` : '';
-    } else {
-      $claimCd.textContent = '';
-    }
-  }
-  if ($claimLabel) {
-    $claimLabel.style.color = '#f0a500';
-  }
+  // Claim 功能已移除：请在 Polymarket 官网 Settings 中开启 Auto Redeem
   updateCompactOverview();
 }, 250);
 
@@ -1529,6 +1858,10 @@ function onMessage(msg) {
     }
     return;
   }
+  if (msg.type === 'pmPnl') {
+    renderPmPnl(msg.events || [], msg.total || null);
+    return;
+  }
   if (msg.type === 'window') {
     windowEnd = msg.windowEnd;
     $range.textContent = `${new Date(msg.windowStart*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} → ${new Date(msg.windowEnd*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`;
@@ -1545,23 +1878,8 @@ function onMessage(msg) {
     }
     return;
   }
-  if (msg.type === 'claimable') {
-    _claimTotal = msg.total || 0;
-    _claimCount = msg.positions?.length || 0;
-    document.getElementById('claim-amount').textContent = '$' + _claimTotal.toFixed(2);
-    refreshClaimDisplayMeta();
-    return;
-  }
-  if (msg.type === 'claimCooldown') {
-    _claimCooldownRunning = !!msg.running;
-    _claimNextCheckAt = Number(msg.nextCheckAt) || 0;
-    const status = document.getElementById('claim-status');
-    if (!_claimCooldownRunning && status && status.textContent?.startsWith('领取中')) {
-      status.textContent = '';
-    }
-    refreshClaimDisplayMeta();
-    return;
-  }
+  // claimable / claimCooldown 消息已忽略（Claim 功能已移至 Polymarket 官网）
+  if (msg.type === 'claimable' || msg.type === 'claimCooldown') return;
   if (msg.type === 'backtestStatus') {
     backtestCollecting = !!msg.collecting;
     updateBacktestUI();
@@ -1661,6 +1979,22 @@ function onMessage(msg) {
   }
   serverBinanceDiff = typeof msg.binanceDiff === 'number' ? msg.binanceDiff : NaN;
   updateBnDiff();
+
+  // 更新 K 线状态
+  if (msg.klineCounts) {
+    const $k1 = document.getElementById('kline-1m-count');
+    const $k5 = document.getElementById('kline-5m-count');
+    const k1 = Number(msg.klineCounts.k1m) || 0;
+    const k5 = Number(msg.klineCounts.k5m) || 0;
+    if ($k1) {
+      $k1.textContent = String(k1);
+      $k1.style.color = k1 >= 120 ? '#3fb950' : k1 >= 30 ? '#f0a500' : '#f85149';
+    }
+    if ($k5) {
+      $k5.textContent = String(k5);
+      $k5.style.color = k5 >= 20 ? '#3fb950' : k5 >= 5 ? '#f0a500' : '#f85149';
+    }
+  }
 
   // BTC 价格
   $ptb.textContent = msg.priceToBeat != null ? `$${msg.priceToBeat.toFixed(2)}` : '—';
@@ -1784,6 +2118,7 @@ function onMessage(msg) {
     strat.perStrategy = msg.strategy.perStrategy || {};
     stratBuyLockUntil = Number(msg.strategy.buyLockUntil) || 0;
   }
+  updateFairProb(msg);
 
   updateOrderAvailability();
   updateEst();
@@ -1803,12 +2138,7 @@ function pickSignalDir(d, upPct, dnPct) {
   return dnPct < upPct ? 'down' : 'up';  // 差价为0，选更便宜的
 }
 
-function resetSignal() {
-  _lastSignalKey = '';
-  $signalResetBtn.style.display = 'none';
-}
-
-function clearBestDrivenState(message = '等待盘口 best...') {
+function clearBestDrivenState() {
   curBestBid = NaN;
   curBestAsk = NaN;
   probabilityReady = false;
@@ -1823,9 +2153,6 @@ function clearBestDrivenState(message = '等待盘口 best...') {
   $probUp.textContent = '—';
   $probDown.textContent = '—';
   $probFill.style.width = '50%';
-  $signalResetBtn.style.display = 'none';
-  $signalBox.className = '';
-  $signalText.textContent = message;
   updateBnDiff();
   updateCompactOverview();
 }
@@ -1956,11 +2283,16 @@ async function initStrategyUI() {
     }
 
     container.innerHTML = '';
-    for (const desc of descriptions) {
+    // 按类型分组
+    const categories = [
+      { label: '差价', color: '#58a6ff', keys: ['s1', 's2', 's3'] },
+      { label: '反转', color: '#d2a8ff', keys: ['s4'] },
+      { label: '概率追赶', color: '#f0a500', keys: ['s5'] },
+    ];
+    const seen = new Set();
+    const buildGroup = (desc) => {
       const group = document.createElement('div');
       group.className = 'strat-group';
-
-      // 构建 tip-box 内容
       let tipHtml = `<div style="color:#f0a500;margin-bottom:4px">${desc.title}</div>`;
       for (const line of desc.lines) {
         const style = [];
@@ -1969,20 +2301,51 @@ async function initStrategyUI() {
         const styleAttr = style.length ? ` style="${style.join(';')}"` : '';
         tipHtml += `<div${styleAttr}>${line.text}</div>`;
       }
-
       group.innerHTML = `
         <label>
           <input type="checkbox" id="${desc.key}-chk" title="仅修改当前运行状态">
-          <span class="strat-tip">策略${desc.number}:${desc.name}
+          <span class="strat-tip">${desc.number}·${desc.name}
             <div class="tip-box">${tipHtml}</div>
           </span>
         </label>
         <input type="number" class="strat-amt" id="${desc.key}-amt" value="1" min="0.01" step="0.01" title="仅修改当前运行状态">
         <span style="color:#555">U</span>
       `;
-      container.appendChild(group);
-
-      // 绑定控件引用
+      return group;
+    };
+    for (const cat of categories) {
+      const cat_descs = descriptions.filter((d) => cat.keys.includes(d.key));
+      if (!cat_descs.length) continue;
+      const row = document.createElement('div');
+      row.className = 'strat-row';
+      row.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+      const catLabel = document.createElement('span');
+      catLabel.style.cssText = `font-size:11px;font-weight:600;color:${cat.color};min-width:60px`;
+      catLabel.textContent = cat.label;
+      row.appendChild(catLabel);
+      for (const desc of cat_descs) {
+        row.appendChild(buildGroup(desc));
+        seen.add(desc.key);
+      }
+      container.appendChild(row);
+    }
+    // 其他未分类策略（兼容未来新增）
+    const others = descriptions.filter((d) => !seen.has(d.key));
+    if (others.length) {
+      const row = document.createElement('div');
+      row.className = 'strat-row';
+      row.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+      const catLabel = document.createElement('span');
+      catLabel.style.cssText = 'font-size:11px;font-weight:600;color:#888;min-width:60px';
+      catLabel.textContent = '其他';
+      row.appendChild(catLabel);
+      for (const desc of others) {
+        row.appendChild(buildGroup(desc));
+      }
+      container.appendChild(row);
+    }
+    // 绑定控件引用（所有 descriptions）
+    for (const desc of descriptions) {
       stratChkEls[desc.key] = document.getElementById(`${desc.key}-chk`);
       stratAmtEls[desc.key] = document.getElementById(`${desc.key}-amt`);
     }
@@ -2006,6 +2369,8 @@ async function initStrategyUI() {
 // 页面加载时初始化策略 UI
 initStrategyUI();
 if ($maxRoundEntries) $maxRoundEntries.addEventListener('change', saveStrategyConfigFromControls);
+if ($marketHoursOnly) $marketHoursOnly.addEventListener('change', saveStrategyConfigFromControls);
+if ($autoClaimEnabled) $autoClaimEnabled.addEventListener('change', saveStrategyConfigFromControls);
 
 // F1/F2 快捷键切换买入/卖出，F3/F4 切换涨跌方向
 document.addEventListener('keydown', e => {
@@ -2016,20 +2381,7 @@ document.addEventListener('keydown', e => {
 });
 
 function updateSignal() {
-  const rem = windowEnd ? windowEnd - Math.floor(Date.now() / 1000) : 0;
-  const d = _signalDiff;
-  const upPct = _signalUpPct;
-  const dnPct = _signalDnPct;
-
-  if (isNaN(d) || isNaN(upPct)) {
-    $signalBox.className = ''; $signalText.textContent = isNaN(curBestBid) || isNaN(curBestAsk) ? '等待盘口 best...' : '暂无信号';
-    $signalResetBtn.style.display = 'none';
-    _lastSignalKey = ''; return;
-  }
-
-  $signalBox.className = '';
-  $signalText.textContent = '暂无信号';
-  $signalResetBtn.style.display = 'none';
+  // 遗留函数，机会提示已移除；仍保留 _lastSignalKey 清理以防他处引用
   _lastSignalKey = '';
 }
 
@@ -2153,19 +2505,8 @@ function translateError(msg) {
   return msg;
 }
 
-let _claimTotal = 0, _claimCount = 0;
-let _claimCooldownRunning = false, _claimNextCheckAt = 0;
-
-function refreshClaimDisplayMeta() {
-  const label = document.getElementById('claim-label');
-  const count = document.getElementById('claim-count');
-  if (label) {
-    label.style.color = '#f0a500';
-  }
-  if (count) {
-    count.textContent = `(${_claimCount}笔)`;
-  }
-}
+// Claim 状态变量已移除（功能迁移至 Polymarket 官网）
+function refreshClaimDisplayMeta() { /* no-op */ }
 
 // ── 回测数据收集 ─────────────────────────────────────────────
 let backtestCollecting = false;
@@ -2194,65 +2535,7 @@ async function toggleBacktest() {
   }
 }
 
-async function submitClaim(retryCount = 0) {
-  const btn = document.getElementById('claim-btn');
-  const status = document.getElementById('claim-status');
-  const count = _claimCount;
-
-  if (count === 0) {
-    status.style.color = '#666';
-    status.textContent = '暂无可领取';
-    btn.disabled = false;
-    setTimeout(() => { status.textContent = ''; }, 2000);
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = 'Claim';
-  status.style.color = '#f0a500';
-  status.textContent = count > 0 ? `领取中 0/${count}` : '领取中...';
-
-  try {
-    const res = await fetch('/api/claim', { method: 'POST' });
-    const data = await res.json();
-    if (res.status === 429) {
-      status.style.color = '#f0a500';
-      status.textContent = data.error || '领取中，请稍候';
-      btn.disabled = false;
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-
-    const ok   = data.results?.filter(r => r.txHash).length || 0;
-    const fail = data.results?.filter(r => r.error) || [];
-
-    if (fail.length === 0) {
-      status.style.color = '#3fb950';
-      status.textContent = `✓ 已领取 ${ok} 笔`;
-      setTimeout(() => { status.textContent = ''; btn.disabled = false; }, 3000);
-    } else {
-      // 部分失败，显示错误并提供重试
-      const errMsg = fail[0].error?.slice(0, 40) || '未知错误';
-      status.style.color = '#f85149';
-      status.textContent = `${ok}笔成功，${fail.length}笔失败: ${errMsg}`;
-      btn.textContent = '重试';
-      btn.disabled = false;
-    }
-  } catch(e) {
-    const msg = e.message?.slice(0, 40) || '网络错误';
-    if (retryCount < 2) {
-      // 自动重试最多2次
-      status.style.color = '#f0a500';
-      status.textContent = `失败，${3}秒后自动重试 (${retryCount + 1}/2)...`;
-      setTimeout(() => submitClaim(retryCount + 1), 3000);
-    } else {
-      status.style.color = '#f85149';
-      status.textContent = `失败: ${msg}`;
-      btn.textContent = '重试';
-      btn.disabled = false;
-    }
-  }
-}
+// submitClaim 已移除：请在 Polymarket 官网 Settings 中开启 Auto Redeem
 
 async function submitOrder() {
   const amount = parseFloat($amtInput.value);

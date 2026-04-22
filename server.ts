@@ -8,19 +8,16 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, unlinkSync } from "fs";
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { ClobClient, Side, OrderType, Chain, SignatureTypeV2 as SignatureType, AssetType, getContractConfig } from "@polymarket/clob-client-v2";
-import { BuilderConfig } from "@polymarket/builder-signing-sdk";
-import { RelayClient, RelayerTxType } from "@polymarket/builder-relayer-client";
-import { createWalletClient, http } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { polygon } from "viem/chains";
-import type { Hex } from "viem";
 import { getAllStrategies, getStrategy, getAllDescriptions } from "./strategies/registry.js";
 import type { StrategyNumber, StrategyDirection, StrategyLifecycleState, StrategyKey } from "./strategies/types.js";
 import { ALL_STRATEGY_KEYS } from "./strategies/types.js";
+import { getFairProb } from "./strategies/fair-prob.js";
+import { getRealFillFromTx } from "./chain-watcher.js";
+import { PmPnlManager } from "./polymarket-pnl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: resolve(__dirname, ".env") });
@@ -39,6 +36,7 @@ interface StrategyConfig {
   slippage: number;
   autoClaimEnabled: boolean;
   maxRoundEntries: number;
+  marketHoursOnly: boolean;  // 动量策略只在美股开盘时段入场
 }
 
 interface StrategyConfigUpdate {
@@ -47,6 +45,7 @@ interface StrategyConfigUpdate {
   slippage?: unknown;
   autoClaimEnabled?: unknown;
   maxRoundEntries?: unknown;
+  marketHoursOnly?: unknown;
 }
 
 interface StrategyRuntimeState {
@@ -63,6 +62,16 @@ interface StrategyRuntimeState {
   buyLockUntil: number;
   positionsReady: boolean;
   roundEntryCount: number;
+}
+
+interface Kline {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  closed: boolean;
 }
 
 interface TradeHistoryItem {
@@ -151,14 +160,17 @@ const PORT = 3456;
 const MARKET_WS_URL    = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const CHAINLINK_WS_URL = "wss://ws-live-data.polymarket.com";
 const USER_WS_URL      = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
-const BINANCE_WS_URL   = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
+const BINANCE_WS_URL   = "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@kline_1m/btcusdt@kline_5m";
 const GAMMA_URL        = "https://gamma-api.polymarket.com";
 const CLOB_URL         = "https://clob.polymarket.com";
 const HISTORY_RETENTION_MS = 130000;
 const MAX_CHAINLINK_HISTORY_POINTS = 2000;
 const MAX_BINANCE_HISTORY_POINTS = 4000;
+const MAX_KLINE_1M = 200;  // 保留200根1分钟K线
+const MAX_KLINE_5M = 50;   // 保留50根5分钟K线
 const MAX_CONFIRMED_TRADE_IDS = 2000;
-const CLAIM_CYCLE_DELAY_MS = 30000;
+const CLAIM_CYCLE_DELAY_MS = 15000;        // 查询间隔 15s（高频，保证前端金额实时）
+const CLAIM_COOLDOWN_MS = 5 * 60 * 1000;   // Claim 冷却：无论成功失败，5 分钟后才能再次 claim
 const UNVERIFIED_SELL_BUFFER = 0.05;
 const POST_TRADE_CALIBRATION_MS = 18000;  // 下单后校准等待时长，买入锁也用此值
 const STRAT_BUY_LOCK_MS = POST_TRADE_CALIBRATION_MS;
@@ -181,11 +193,6 @@ const PENDING_TRADE_META_MAX_AGE_MS = 15 * 60 * 1000;
 
 const PRIVATE_KEY   = process.env.POLYMARKET_PRIVATE_KEY || "";
 const PROXY_ADDRESS = process.env.POLYMARKET_PROXY_ADDRESS || "";
-const POLY_BUILDER_API_KEY = process.env.POLY_BUILDER_API_KEY || "";
-const POLY_BUILDER_SECRET = process.env.POLY_BUILDER_SECRET || "";
-const POLY_BUILDER_PASSPHRASE = process.env.POLY_BUILDER_PASSPHRASE || "";
-const POLY_BUILDER_CODE = process.env.POLY_BUILDER_CODE || "";
-const POLY_BUILDER_ADDRESS = process.env.POLY_BUILDER_ADDRESS || "";
 const APP_MODE: AppMode = process.env.APP_MODE === "headless" ? "headless" : "full";
 const IS_FULL_MODE = APP_MODE === "full";
 
@@ -201,8 +208,9 @@ function createEnvStrategyConfig(): StrategyConfig {
     enabled,
     amount,
     slippage: parseNumberEnv("ORDER_DEFAULT_SLIPPAGE", 0.05, 0),
-    autoClaimEnabled: parseBooleanEnv("AUTO_CLAIM_ENABLED", true),
+    autoClaimEnabled: parseBooleanEnv("AUTO_CLAIM_ENABLED", false),
     maxRoundEntries: parseNumberEnv("MAX_ROUND_ENTRIES", 1, 1),
+    marketHoursOnly: parseBooleanEnv("MARKET_HOURS_ONLY", false),
   };
 }
 
@@ -213,6 +221,7 @@ function cloneStrategyConfig(config: StrategyConfig): StrategyConfig {
     slippage: config.slippage,
     autoClaimEnabled: config.autoClaimEnabled,
     maxRoundEntries: config.maxRoundEntries,
+    marketHoursOnly: config.marketHoursOnly,
   };
 }
 
@@ -223,6 +232,12 @@ function loadPersistedStrategyConfig(config: StrategyConfig): void {
     if (typeof raw.maxRoundEntries === "number" && raw.maxRoundEntries >= 1) {
       config.maxRoundEntries = Math.floor(raw.maxRoundEntries);
     }
+    if (typeof raw.marketHoursOnly === "boolean") {
+      config.marketHoursOnly = raw.marketHoursOnly;
+    }
+    if (typeof raw.autoClaimEnabled === "boolean") {
+      config.autoClaimEnabled = raw.autoClaimEnabled;
+    }
   } catch {
     // ignore
   }
@@ -230,7 +245,11 @@ function loadPersistedStrategyConfig(config: StrategyConfig): void {
 
 function savePersistedStrategyConfig(config: StrategyConfig): void {
   try {
-    writeFileSync(STRATEGY_CONFIG_FILE, JSON.stringify({ maxRoundEntries: config.maxRoundEntries }, null, 2));
+    writeFileSync(STRATEGY_CONFIG_FILE, JSON.stringify({
+      maxRoundEntries: config.maxRoundEntries,
+      marketHoursOnly: config.marketHoursOnly,
+      autoClaimEnabled: config.autoClaimEnabled,
+    }, null, 2));
   } catch (err) {
     console.warn(`[StrategyConfig] 持久化保存失败: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -276,6 +295,12 @@ function applyStrategyConfigUpdate(current: StrategyConfig, rawUpdate: unknown):
     const parsed = parseNumberLike(rawUpdate.maxRoundEntries, 1);
     if (parsed == null || !Number.isInteger(parsed)) return { error: "maxRoundEntries 必须是大于等于1的整数" };
     next.maxRoundEntries = parsed;
+  }
+
+  if ("marketHoursOnly" in rawUpdate) {
+    const parsed = parseBooleanLike(rawUpdate.marketHoursOnly);
+    if (parsed == null) return { error: "marketHoursOnly 必须是布尔值" };
+    next.marketHoursOnly = parsed;
   }
 
   return { config: next };
@@ -362,6 +387,9 @@ function applyTradeHistoryMetrics(items: TradeHistoryItem[]): TradeHistoryItem[]
   return items.sort((a, b) => b.ts - a.ts);
 }
 
+// ── Polymarket 真实盈亏管理器 ─────────────────────────────────
+const pmPnlManager = new PmPnlManager(PROXY_ADDRESS);
+
 function recordTradeHistory(item: Omit<TradeHistoryItem, "id">): void {
   const record: TradeHistoryItem = {
     id: `${item.ts}-${item.side}-${item.direction}-${item.source}-${Math.random().toString(36).slice(2, 8)}`,
@@ -377,7 +405,36 @@ function recordTradeHistory(item: Omit<TradeHistoryItem, "id">): void {
   } catch (err) {
     console.warn(`[TradeHistory] 保存失败: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // 记录 txHash → source 映射，供 Polymarket PnL 标注策略来源
+  if (record.txHash && record.source) {
+    pmPnlManager.recordStrategySource(record.txHash, record.source);
+  }
+  // 触发增量同步（不阻塞）
+  if (record.txHash) {
+    console.log(`[PmPnl] 下单触发增量同步 (tx: ${record.txHash.slice(0, 10)}...)`);
+    pmPnlManager.syncIncremental().then(() => {
+      console.log(`[PmPnl] 下单增量完成 → broadcast`);
+      broadcastPmPnl();
+    }).catch((err) => {
+      console.warn(`[PmPnl] 下单增量失败: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  } else {
+    console.log(`[PmPnl] 跳过增量同步（无 txHash）`);
+  }
   broadcastTradeHistory();
+}
+
+function broadcastPmPnl(): void {
+  // 全量：前端按 range 过滤，不截断
+  const events = pmPnlManager.getEvents();
+  const total = pmPnlManager.getTotalPnl();
+  broadcast("pmPnl", { events, total, initialized: pmPnlManager.isInitialized() });
+}
+
+function sendPmPnlToClient(ws: WebSocket): void {
+  const events = pmPnlManager.getEvents();
+  const total = pmPnlManager.getTotalPnl();
+  send(ws, "pmPnl", { events, total, initialized: pmPnlManager.isInitialized() });
 }
 
 function cleanupPendingTradeMeta(now = Date.now()): void {
@@ -466,33 +523,6 @@ interface PolymarketCreds {
   key: string; secret: string; passphrase: string; address: string;
 }
 
-function normalizeBuilderCode(raw: string): `0x${string}` | null {
-  const code = raw.trim();
-  if (!code) return null;
-  if (/^0x[0-9a-fA-F]{64}$/.test(code)) return code as `0x${string}`;
-  if (ethers.isAddress(code)) {
-    return `0x${code.toLowerCase().slice(2).padStart(64, "0")}` as `0x${string}`;
-  }
-  return null;
-}
-
-function buildBuilderConfig(): { builderConfig?: { builderAddress: string; builderCode: `0x${string}` } } {
-  const builderCode = normalizeBuilderCode(POLY_BUILDER_CODE);
-  if (!builderCode) return {};
-  const fallback = PROXY_ADDRESS || "";
-  const builderAddress = POLY_BUILDER_ADDRESS.trim() || fallback;
-  if (!builderAddress || !ethers.isAddress(builderAddress)) {
-    console.warn("[Builder] POLY_BUILDER_CODE 已配置但 builderAddress 无效，忽略 builder 配置。");
-    return {};
-  }
-  return {
-    builderConfig: {
-      builderAddress,
-      builderCode,
-    },
-  };
-}
-
 function adaptSigner(wallet: ethers.Wallet) {
   return {
     _signTypedData: (
@@ -518,24 +548,17 @@ function loadCreds(): PolymarketCreds | null {
 }
 
 async function createClobClient(): Promise<ClobClient | null> {
-  let sigType = SignatureType.EOA;
-  if (PROXY_ADDRESS) {
-    const provider = new ethers.JsonRpcProvider("https://polygon-bor-rpc.publicnode.com", 137, { staticNetwork: true });
-    const isSafe = await detectSafeClaimSupport(provider, PROXY_ADDRESS);
-    sigType = isSafe ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.POLY_PROXY;
-    console.log(`[Auth] 使用 signatureType=${isSafe ? "POLY_GNOSIS_SAFE" : "POLY_PROXY"}`);
-  }
+  const sigType = PROXY_ADDRESS ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA;
   const funderAddress = PROXY_ADDRESS || undefined;
   const saved   = loadCreds();
-  const builderOpts = buildBuilderConfig();
 
   if (saved) {
     const creds = { key: saved.key, secret: saved.secret, passphrase: saved.passphrase };
     if (PRIVATE_KEY) {
       const signer = adaptSigner(new ethers.Wallet(PRIVATE_KEY)) as any;
-      return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress, ...builderOpts });
+      return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
     }
-    return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, creds, signatureType: sigType, funderAddress, ...builderOpts });
+    return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, creds, signatureType: sigType, funderAddress });
   }
 
   if (!PRIVATE_KEY) {
@@ -546,31 +569,11 @@ async function createClobClient(): Promise<ClobClient | null> {
   console.log("[Auth] 首次使用，通过私钥生成 Polymarket API 凭证...");
   const wallet = new ethers.Wallet(PRIVATE_KEY);
   const signer = adaptSigner(wallet) as any;
-  const client = new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, signatureType: sigType, funderAddress, ...builderOpts });
+  const client = new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, signatureType: sigType, funderAddress });
   const creds  = await client.createOrDeriveApiKey();
   writeFileSync(CREDS_FILE, JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase, address: wallet.address }, null, 2));
   console.log("[Auth] 凭证已保存到 .polymarket-creds.json");
-  return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress, ...builderOpts });
-}
-
-function clearCachedCreds(): void {
-  try {
-    if (existsSync(CREDS_FILE)) unlinkSync(CREDS_FILE);
-  } catch (err) {
-    console.warn(`[Auth] 清理本地凭证失败: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-function isUnauthorizedApiKeyError(msg: string): boolean {
-  const text = msg.toLowerCase();
-  return text.includes("unauthorized/invalid api key") || (text.includes("unauthorized") && text.includes("api key"));
-}
-
-async function rebuildClobClientCreds(): Promise<boolean> {
-  if (!PRIVATE_KEY) return false;
-  clearCachedCreds();
-  clobClient = null;
-  return ensureClobClient();
+  return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
 }
 
 // ── HTTP 服务 ─────────────────────────────────────────────────
@@ -623,6 +626,8 @@ const state = {
   binanceOffset: null as number | null,
   priceHistory: [] as Array<{ t: number; price: number }>,
   binanceHistory: [] as Array<{ t: number; price: number }>,
+  kline1m: [] as Array<Kline>,
+  kline5m: [] as Array<Kline>,
 };
 
 const strategyRuntime: StrategyRuntimeState = {
@@ -1026,6 +1031,23 @@ function buildStrategyRuntimePayload(): Record<string, unknown> {
   };
 }
 
+/** 计算当前合理概率（供 s5/s10/s11 前端面板实时展示） */
+function computeFairProbPayload(): {
+  diff: number | null;
+  rem: number;
+  upPct: number | null;
+  fairUp: number | null;
+  biasUp: number | null;
+} | null {
+  const diff = getStrategyDiff();
+  const rem = getStrategyRemainingSeconds();
+  const snap = getProbabilitySnapshot();
+  if (diff == null || !snap) return { diff, rem, upPct: snap?.upPct ?? null, fairUp: null, biasUp: null };
+  const fairUp = getFairProb(diff, rem);
+  const biasUp = fairUp != null ? fairUp - snap.upPct : null;
+  return { diff, rem, upPct: snap.upPct, fairUp, biasUp };
+}
+
 function buildStatePayload(options: boolean | StatePayloadOptions = false): Record<string, unknown> {
   const normalized = typeof options === "boolean" ? { includeHistory: options } : options;
   const includeHistory = normalized.includeHistory === true;
@@ -1049,7 +1071,9 @@ function buildStatePayload(options: boolean | StatePayloadOptions = false): Reco
     priceToBeat:  state.priceToBeat,
     currentPrice: state.currentPrice,
     binanceOffset: state.binanceOffset,
+    klineCounts: { k1m: state.kline1m.length, k5m: state.kline5m.length },
     binanceDiff: getStrategyDiff(),
+    fairProb: computeFairProbPayload(),
     usdc:           positions.usdc,
     usdcAllowanceStatus: positions.usdcAllowanceStatus,
     usdcAllowanceMin: positions.usdcAllowanceMin,
@@ -1367,6 +1391,29 @@ function startUserWs(): void {
             + `${txHash ? ` tx:${txHash.slice(0, 10)}...` : ""}`
           );
           broadcastState();
+
+          // 买入后异步链上校准：WS 推送的 size 有 ~1% 偏差，用链上真实值修正
+          if (side === "buy" && txHash && PROXY_ADDRESS) {
+            const wsSize = size;
+            const targetAssetId = assetId;
+            void (async () => {
+              const realFill = await getRealFillFromTx(txHash, PROXY_ADDRESS);
+              if (realFill == null) {
+                console.log(`[ChainWatcher] ⚠ 校准失败 tx:${txHash.slice(0, 10)}... 将由 REST 兜底`);
+                return;
+              }
+              const delta = realFill - wsSize;
+              if (Math.abs(delta) < 0.000001) {
+                console.log(`[ChainWatcher] ✓ 买入校准 ${targetAssetId.slice(-6)} WS:${wsSize} = 链上:${realFill}`);
+              } else {
+                positions.localSize[targetAssetId] = (positions.localSize[targetAssetId] ?? 0) + delta;
+                console.log(`[ChainWatcher] ✓ 买入校准 ${targetAssetId.slice(-6)} WS:${wsSize} → 链上:${realFill} (delta:${delta >= 0 ? "+" : ""}${delta.toFixed(6)})`);
+              }
+              positions.apiSize[targetAssetId] = positions.localSize[targetAssetId];
+              positions.apiVerified[targetAssetId] = true;
+              broadcastState();
+            })();
+          }
         }
       }
     } catch { /* 忽略 */ }
@@ -1420,6 +1467,7 @@ function applyBestBidAskUpdate(
   state.bestBid = bestBid;
   state.bestAsk = bestAsk;
   marketBestReady = true;
+  scheduleStrategyTick();  // 盘口更新（概率变化）立即触发策略检查
   return true;
 }
 
@@ -1607,6 +1655,7 @@ function startChainlinkWs(expectedWindowStart: number, eventSlug: string, onClos
           maybeInitializeBinanceOffset();
           broadcast("chainlinkPrice", { t: now, price: val });
           broadcastState();
+          scheduleStrategyTick();  // 价格更新立即触发策略检查
         }
       }
     } catch { /* 忽略 */ }
@@ -1627,19 +1676,119 @@ function startChainlinkWs(expectedWindowStart: number, eventSlug: string, onClos
 let binanceWs: WebSocket | null = null;
 let binanceWsAttempt = 0;
 
+function updateKlineArray(arr: Kline[], k: Kline, maxSize: number): void {
+  const last = arr[arr.length - 1];
+  if (last && last.openTime === k.openTime) {
+    // 同一根 K 线更新中
+    arr[arr.length - 1] = k;
+  } else {
+    arr.push(k);
+    if (arr.length > maxSize) arr.splice(0, arr.length - maxSize);
+  }
+}
+
+/** 从 Binance REST 拉取历史 K 线（用于启动预填充和重连后补缺口） */
+async function fetchHistoricalKlines(interval: "1m" | "5m", limit: number): Promise<Kline[] | null> {
+  try {
+    const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const raw = await res.json() as Array<Array<string | number>>;
+    return raw.map((r) => ({
+      openTime: Number(r[0]),
+      open: parseFloat(String(r[1])),
+      high: parseFloat(String(r[2])),
+      low: parseFloat(String(r[3])),
+      close: parseFloat(String(r[4])),
+      volume: parseFloat(String(r[5])),
+      closed: true,  // REST 返回的都是已收盘的
+    }));
+  } catch (err) {
+    console.warn(`[Binance] 拉取历史 ${interval} K 线失败: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/** 合并历史 K 线到现有数组，去重并保留最新 maxSize 根 */
+function mergeKlines(existing: Kline[], fetched: Kline[], maxSize: number): void {
+  const map = new Map<number, Kline>();
+  for (const k of existing) map.set(k.openTime, k);
+  for (const k of fetched) {
+    // 历史数据只在当前没有或为未收盘时覆盖
+    const curr = map.get(k.openTime);
+    if (!curr || !curr.closed) map.set(k.openTime, k);
+  }
+  const sorted = [...map.values()].sort((a, b) => a.openTime - b.openTime);
+  existing.length = 0;
+  const start = Math.max(0, sorted.length - maxSize);
+  for (let i = start; i < sorted.length; i++) existing.push(sorted[i]);
+}
+
+async function loadHistoricalKlines(): Promise<void> {
+  const [k1m, k5m] = await Promise.all([
+    fetchHistoricalKlines("1m", MAX_KLINE_1M),
+    fetchHistoricalKlines("5m", MAX_KLINE_5M),
+  ]);
+  if (k1m) {
+    mergeKlines(state.kline1m, k1m, MAX_KLINE_1M);
+    console.log(`[Binance] 1m K 线预填充 ${state.kline1m.length} 根`);
+  }
+  if (k5m) {
+    mergeKlines(state.kline5m, k5m, MAX_KLINE_5M);
+    console.log(`[Binance] 5m K 线预填充 ${state.kline5m.length} 根`);
+  }
+}
+
 function startBinanceWs(): void {
   binanceWs = new WebSocket(BINANCE_WS_URL);
-  binanceWs.on("open", () => { console.log(binanceWsAttempt === 0 ? "[BinanceWS] 已连接" : "[BinanceWS] 重连成功"); binanceWsAttempt = 0; wsStatus.binance = true; broadcastWsStatus(); });
+  binanceWs.on("open", () => {
+    console.log(binanceWsAttempt === 0 ? "[BinanceWS] 已连接" : "[BinanceWS] 重连成功");
+    binanceWsAttempt = 0;
+    wsStatus.binance = true;
+    broadcastWsStatus();
+    // 连接成功后异步拉取历史 K 线，填充 / 补缺口
+    void loadHistoricalKlines();
+  });
   binanceWs.on("message", (data) => {
     try {
-      const msg = JSON.parse(data.toString()) as { p?: string; T?: number };
-      const price = parseFloat(msg.p ?? "");
-      const t = msg.T ?? Date.now();
-      if (!price) return;
-      state.binanceHistory.push({ t, price });
-      trimHistory(state.binanceHistory, t - HISTORY_RETENTION_MS, MAX_BINANCE_HISTORY_POINTS);
-      maybeInitializeBinanceOffset();
-      broadcast("binancePrice", { t, price });
+      const raw = JSON.parse(data.toString()) as { stream?: string; data?: Record<string, unknown> };
+      const stream = raw.stream;
+      const payload = raw.data;
+      if (!stream || !payload) return;
+
+      if (stream.endsWith("@aggTrade")) {
+        const p = payload as { p?: string; T?: number };
+        const price = parseFloat(p.p ?? "");
+        const t = p.T ?? Date.now();
+        if (!price) return;
+        state.binanceHistory.push({ t, price });
+        trimHistory(state.binanceHistory, t - HISTORY_RETENTION_MS, MAX_BINANCE_HISTORY_POINTS);
+        maybeInitializeBinanceOffset();
+        broadcast("binancePrice", { t, price });
+        scheduleStrategyTick();  // 价格变化立即触发策略检查
+        return;
+      }
+
+      if (stream.endsWith("@kline_1m") || stream.endsWith("@kline_5m")) {
+        const kData = (payload as { k?: Record<string, unknown> }).k;
+        if (!kData) return;
+        const kline: Kline = {
+          openTime: Number(kData.t),
+          open: parseFloat(String(kData.o)),
+          high: parseFloat(String(kData.h)),
+          low: parseFloat(String(kData.l)),
+          close: parseFloat(String(kData.c)),
+          volume: parseFloat(String(kData.v)),
+          closed: Boolean(kData.x),
+        };
+        if (stream.endsWith("@kline_1m")) {
+          updateKlineArray(state.kline1m, kline, MAX_KLINE_1M);
+        } else {
+          updateKlineArray(state.kline5m, kline, MAX_KLINE_5M);
+        }
+        scheduleStrategyTick();  // K线更新立即触发策略检查
+        return;
+      }
     } catch { /* 忽略 */ }
   });
   binanceWs.on("close", () => {
@@ -1888,16 +2037,23 @@ async function subscribeWindow(windowStart: number): Promise<void> {
 
 // ── Claim 查询 ────────────────────────────────────────────────
 interface ClaimPosition {
-  conditionId: string; title: string; currentValue: number; size: number; outcomeIndex: number;
+  conditionId: string; title: string; currentValue: number; size: number;
 }
 let claimablePositions: ClaimPosition[] = [];
 let claimableTotal = 0;
 let claimCycleTimer: ReturnType<typeof setTimeout> | null = null;
 let claimCycleRunning = false;
 let claimNextCheckAt = 0;
+let claimCooldownUntil = 0;       // Claim 冷却截止时间戳（5 分钟）
+let claimLastReason = "";         // 最近一次跳过的原因，供前端显示
 
 function broadcastClaimCooldown(running = false): void {
-  broadcast("claimCooldown", { running, nextCheckAt: claimNextCheckAt });
+  broadcast("claimCooldown", {
+    running,
+    nextCheckAt: claimNextCheckAt,
+    cooldownUntil: claimCooldownUntil,
+    reason: claimLastReason,
+  });
 }
 
 function resetClaimableState(): void {
@@ -1914,9 +2070,9 @@ async function syncClaimable(options: { clearOnError?: boolean } = {}): Promise<
   try {
     const pos = await fetch(
       `https://data-api.polymarket.com/positions?user=${PROXY_ADDRESS}&sizeThreshold=.01&redeemable=true&limit=100&offset=0`
-    ).then(r => r.json()) as Array<{ conditionId: string; title: string; currentValue: number; size: number; curPrice: number; outcomeIndex?: number; redeemable?: boolean }>;
-    claimablePositions = pos.filter(p => p.redeemable === true && Number(p.currentValue ?? 0) > 0).map(p => ({
-      conditionId: p.conditionId, title: p.title, currentValue: p.currentValue, size: p.size, outcomeIndex: Number(p.outcomeIndex ?? 0),
+    ).then(r => r.json()) as Array<{ conditionId: string; title: string; currentValue: number; size: number; curPrice: number }>;
+    claimablePositions = pos.filter(p => p.curPrice === 1).map(p => ({
+      conditionId: p.conditionId, title: p.title, currentValue: p.currentValue, size: p.size,
     }));
     claimableTotal = claimablePositions.reduce((s, p) => s + p.currentValue, 0);
     broadcast("claimable", { total: claimableTotal, positions: claimablePositions });
@@ -1955,11 +2111,47 @@ async function autoClaimCycle(): Promise<void> {
   claimNextCheckAt = 0;
   broadcastClaimCooldown(true);
   try {
+    // Step 1: 每次循环都查询最新可领取金额（高频刷新，前端显示实时）
     const synced = await syncClaimable({ clearOnError: true });
     if (!synced) return;
-    if (!strategyConfig.autoClaimEnabled || !PRIVATE_KEY) return;
-    if (!claimablePositions.length || claimInProgress) return;
+
+    // Step 2: 决定是否执行 claim
+    if (!strategyConfig.autoClaimEnabled || !PRIVATE_KEY) {
+      claimLastReason = "";
+      return;
+    }
+    if (!claimablePositions.length || claimInProgress) {
+      claimLastReason = "";
+      return;
+    }
+
+    // 冷却期：上次 claim 后 5 分钟内不再执行
+    if (Date.now() < claimCooldownUntil) {
+      const remain = Math.ceil((claimCooldownUntil - Date.now()) / 1000);
+      claimLastReason = `冷却中 剩余${remain}s`;
+      return;
+    }
+
+    // 策略忙：入场/持仓/出场中 → 不触发 Safe 交易（避免 nonce 冲突）
+    const strategyBusy = strategyRuntime.state !== "IDLE"
+                      && strategyRuntime.state !== "DONE"
+                      && strategyRuntime.state !== "SCANNING";
+    if (strategyBusy || hasOpenPosition()) {
+      claimLastReason = `策略忙(${strategyRuntime.state})`;
+      console.log(`[自动Claim] ${claimLastReason}，跳过本次`);
+      return;
+    }
+
+    // Step 3: claim 前再刷新一次金额（确保 conditionId 和数量最新）
+    await syncClaimable({ clearOnError: false });
+    if (!claimablePositions.length) {
+      claimLastReason = "";
+      return;
+    }
+
     console.log(`[自动Claim] 检测到 ${claimablePositions.length} 个可领取仓位，后台开始领取...`);
+    claimLastReason = "";
+    claimCooldownUntil = Date.now() + CLAIM_COOLDOWN_MS;  // 进入冷却（无论下面成功失败）
     await runClaim({ refreshAfter: false });
   } finally {
     claimCycleRunning = false;
@@ -1969,97 +2161,22 @@ async function autoClaimCycle(): Promise<void> {
 
 // ── Claim 核心逻辑 ───────────────────────────────────────────
 let claimInProgress = false;
-let safeClaimSupport: boolean | null = null;
-const POLY_PROXY_FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
-let relayClient: RelayClient | null = null;
-let relayClientInitTried = false;
 
-function hasRelayerCreds(): boolean {
-  return !!(POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE);
-}
-
-function getOrCreateRelayClient(): RelayClient | null {
-  if (relayClient) return relayClient;
-  if (!PRIVATE_KEY || !hasRelayerCreds()) return null;
-  if (relayClientInitTried) return null;
-  relayClientInitTried = true;
-  try {
-    const privateKey = (PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : `0x${PRIVATE_KEY}`) as Hex;
-    const account = privateKeyToAccount(privateKey);
-    const wallet = createWalletClient({
-      account,
-      chain: polygon,
-      transport: http("https://polygon-bor-rpc.publicnode.com", { timeout: 30_000 }),
-    });
-    const builderConfig = new BuilderConfig({
-      localBuilderCreds: {
-        key: POLY_BUILDER_API_KEY,
-        secret: POLY_BUILDER_SECRET,
-        passphrase: POLY_BUILDER_PASSPHRASE,
-      },
-    }) as any;
-    relayClient = new RelayClient(
-      "https://relayer-v2.polymarket.com/",
-      137,
-      wallet,
-      builderConfig,
-      RelayerTxType.PROXY,
+// 复用 provider：避免每次 claim 都 new 一个触发网络探测循环
+// 用完整 Network 对象 + staticNetwork 对象版本，跳过启动时的 eth_chainId 探测
+const CLAIM_NETWORK = new ethers.Network("polygon", 137);
+let cachedClaimProvider: ethers.JsonRpcProvider | null = null;
+function getClaimProvider(): ethers.JsonRpcProvider {
+  if (!cachedClaimProvider) {
+    cachedClaimProvider = new ethers.JsonRpcProvider(
+      "https://polygon-bor-rpc.publicnode.com",
+      CLAIM_NETWORK,
+      { staticNetwork: CLAIM_NETWORK },
     );
-    console.log("[Claim] Relayer 客户端初始化成功，Claim 将优先走 gasless。");
-    return relayClient;
-  } catch (err) {
-    console.error(`[Claim] Relayer 客户端初始化失败，回退链上直发: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    // 静默 RPC error（原来的 console.error 会反复打印相同错误）
+    cachedClaimProvider.on("error", () => { /* 由调用方处理 */ });
   }
-}
-
-async function tryGaslessRedeemBatch(
-  client: RelayClient,
-  calls: { to: `0x${string}`; data: `0x${string}`; value: "0" }[],
-): Promise<string> {
-  const response: any = await client.execute(calls, `Web Claim ${calls.length} positions`);
-  const txId = response?.hash ?? response?.transactionID ?? "";
-  const receipt = await response.wait();
-  const state = String(receipt?.state ?? "");
-  if (state === "STATE_CONFIRMED" || state === "STATE_MINED") {
-    return txId;
-  }
-  throw new Error(`Relayer 状态异常: ${state || "unknown"}`);
-}
-
-async function detectSafeClaimSupport(
-  provider: ethers.Provider,
-  safeAddress: string,
-): Promise<boolean> {
-  try {
-    const code = await provider.getCode(safeAddress);
-    if (!code || code === "0x") return false;
-    const nonceData = new ethers.Interface([
-      "function nonce() view returns (uint256)",
-    ]).encodeFunctionData("nonce");
-    await provider.call({ to: safeAddress, data: nonceData });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function getProxyOwnerAddress(
-  provider: ethers.Provider,
-  proxyAddress: string,
-): Promise<string | null> {
-  try {
-    const ownerData = new ethers.Interface([
-      "function owner() view returns (address)",
-    ]).encodeFunctionData("owner");
-    const raw = await provider.call({ to: proxyAddress, data: ownerData });
-    const [owner] = new ethers.Interface([
-      "function owner() view returns (address)",
-    ]).decodeFunctionResult("owner", raw);
-    return String(owner);
-  } catch {
-    return null;
-  }
+  return cachedClaimProvider;
 }
 
 async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ title: string; txHash?: string; error?: string }[]> {
@@ -2071,11 +2188,10 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
 
   const contracts = getContractConfig(137);
   const CTF = contracts.conditionalTokens;
-  const USDC_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // 与 poly-redeem 一致，CTF redeem 使用 USDC.e
+  const USDC_ADDR = contracts.collateral;  // V2 升级后为 pUSD
   const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-  const provider = new ethers.JsonRpcProvider("https://polygon-bor-rpc.publicnode.com", 137, { staticNetwork: true });
-  provider.on('error', (e) => console.error('[RPC]', e.message));
+  const provider = getClaimProvider();
   const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
   const ctfIface = new ethers.Interface([
@@ -2086,27 +2202,7 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
     "function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 nonce) view returns (bytes32)",
     "function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address payable refundReceiver, bytes memory signatures) public payable returns (bool)",
   ]);
-  const proxyFactoryIface = new ethers.Interface([
-    "function proxy((uint8 typeCode,address to,uint256 value,bytes data)[] calls) payable returns (bytes[] returnValues)",
-  ]);
   const safe = new ethers.Contract(PROXY_ADDRESS, safeIface, wallet);
-  const proxyFactory = new ethers.Contract(POLY_PROXY_FACTORY_ADDRESS, proxyFactoryIface, wallet);
-  const relayer = getOrCreateRelayClient();
-
-  if (safeClaimSupport == null) {
-    safeClaimSupport = await detectSafeClaimSupport(provider, PROXY_ADDRESS);
-  }
-  const claimMode = safeClaimSupport ? "safe" : "proxy_factory";
-  console.log(`[Claim] 使用执行模式: ${claimMode}`);
-  if (claimMode === "proxy_factory") {
-    const owner = await getProxyOwnerAddress(provider, PROXY_ADDRESS);
-    if (owner && owner.toLowerCase() !== wallet.address.toLowerCase()) {
-      const msg = `当前私钥地址 ${wallet.address} 不是代理钱包 owner(${owner})，无法发起 claim。请在 .env 使用该代理钱包对应的私钥。`;
-      console.error(`[Claim] ${msg}`);
-      claimInProgress = false;
-      return claimablePositions.map((p) => ({ title: p.title, error: msg }));
-    }
-  }
 
   const snapshot = [...claimablePositions];
   const total = snapshot.length;
@@ -2118,36 +2214,17 @@ async function runClaim(options: { refreshAfter?: boolean } = {}): Promise<{ tit
       console.log(`[Claim] (${i+1}/${total}) ${p.title} 金额:${p.currentValue.toFixed(2)} conditionId:${p.conditionId}`);
       broadcast("claimProgress", { current: i, total, title: p.title, status: "running" });
       try {
-        const indexSet = 1 << p.outcomeIndex;
         const calldata = ctfIface.encodeFunctionData("redeemPositions", [
-          USDC_ADDR, ZERO_BYTES32, p.conditionId, [indexSet]
+          USDC_ADDR, ZERO_BYTES32, p.conditionId, [1, 2]
         ]);
-        if (relayer) {
-          console.log("[Claim] 发送 Relayer(gasless) 交易...");
-          const txHash = await tryGaslessRedeemBatch(relayer, [
-            { to: CTF as `0x${string}`, data: calldata as `0x${string}`, value: "0" },
-          ]);
-          console.log(`[Claim] ✓ 成功 ${p.title} → ${txHash || "(relayer id unavailable)"}`);
-          results.push({ title: p.title, txHash: txHash || undefined });
-          broadcast("claimProgress", { current: i + 1, total, title: p.title, status: "success" });
-          continue;
-        }
-        let tx: ethers.TransactionResponse;
-        if (claimMode === "safe") {
-          const nonce = await safe.nonce();
-          console.log(`[Claim] nonce:${nonce} 构建 Safe 交易...`);
-          const txHash = await safe.getTransactionHash(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, nonce);
-          const sig = await wallet.signMessage(ethers.getBytes(txHash));
-          const v = parseInt(sig.slice(-2), 16) + 4;
-          const adjustedSig = sig.slice(0, -2) + v.toString(16).padStart(2, '0');
-          console.log(`[Claim] 发送 Safe 交易...`);
-          tx = await safe.execTransaction(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, adjustedSig);
-        } else {
-          console.log(`[Claim] 发送 ProxyFactory 交易...`);
-          tx = await proxyFactory.proxy([
-            { typeCode: 1, to: CTF, value: 0, data: calldata },
-          ]);
-        }
+        const nonce = await safe.nonce();
+        console.log(`[Claim] nonce:${nonce} 构建交易中...`);
+        const txHash = await safe.getTransactionHash(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, nonce);
+        const sig = await wallet.signMessage(ethers.getBytes(txHash));
+        const v = parseInt(sig.slice(-2), 16) + 4;
+        const adjustedSig = sig.slice(0, -2) + v.toString(16).padStart(2, '0');
+        console.log(`[Claim] 发送交易...`);
+        const tx = await safe.execTransaction(CTF, 0, calldata, 0, 0, 0, 0, ethers.ZeroAddress, ethers.ZeroAddress, adjustedSig);
         console.log(`[Claim] 等待上链 txHash:${tx.hash}`);
         const receipt = await Promise.race([
           tx.wait(),
@@ -2212,7 +2289,13 @@ function getStrategyRemainingSeconds(now = Date.now()): number {
 }
 
 function buildTickContext(rem: number, upPct: number | null, dnPct: number | null, diff: number | null, now: number): import("./strategies/types.js").StrategyTickContext {
-  return { rem, upPct, dnPct, diff, now, prevUpPct: strategyRuntime.prevUpPct };
+  return {
+    rem, upPct, dnPct, diff, now,
+    prevUpPct: strategyRuntime.prevUpPct,
+    kline1m: state.kline1m,
+    kline5m: state.kline5m,
+    marketHoursOnly: strategyConfig.marketHoursOnly,
+  };
 }
 
 function checkEntry(ctx: import("./strategies/types.js").StrategyTickContext): { strategy: StrategyNumber; dir: StrategyDirection } | null {
@@ -2333,19 +2416,11 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
       { tokenID: tokenId, side: side === "buy" ? Side.BUY : Side.SELL, amount: normalizedAmount, price: normalizedWorstPrice },
       { tickSize, negRisk: false }
     );
-    let result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
-    let orderError = extractOrderError(result);
-    const needRefreshCreds = result?.status === 401 || (orderError && isUnauthorizedApiKeyError(orderError));
-    if (needRefreshCreds) {
-      console.warn(`${orderTag} 检测到 API 凭证失效，自动重建并重试一次下单`);
-      if (await rebuildClobClientCreds()) {
-        result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
-        orderError = extractOrderError(result);
-      }
-    }
+    const result = await clobClient!.postOrder(signedOrder, OrderType.FOK);
     const sideZh = side === "buy" ? "买入" : "卖出";
     const dirZh = direction === "up" ? "涨" : "跌";
     const rawStatus = result?.status ?? "未知";
+    const orderError = extractOrderError(result);
 
     if (result?.status === 400 || orderError) {
       console.warn(`${orderTag} ${sideZh}${dirZh} ${normalizedAmount} 状态:${rawStatus} 原因:${orderError || "-"} ${orderDebug}`);
@@ -2382,10 +2457,6 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (isUnauthorizedApiKeyError(msg)) {
-      console.warn(`${orderTag} 捕获到 401 API key 错误，自动重建 CLOB 凭证`);
-      await rebuildClobClientCreds();
-    }
     console.error(`${orderTag} 失败:`, msg);
     return {
       success: false,
@@ -2454,16 +2525,63 @@ async function strategySell(direction: StrategyDirection, exitReason?: string): 
 }
 
 // ── 回测数据收集 ─────────────────────────────────────────────
-let backtestCollecting = false;
+const BACKTEST_STATE_FILE = resolve(__dirname, ".backtest-state.json");
+
+function loadBacktestState(): boolean {
+  try {
+    if (!existsSync(BACKTEST_STATE_FILE)) return true;  // 首次运行默认开启
+    const data = JSON.parse(readFileSync(BACKTEST_STATE_FILE, "utf-8"));
+    return typeof data.collecting === "boolean" ? data.collecting : true;
+  } catch {
+    return true;
+  }
+}
+
+function persistBacktestState(): void {
+  try {
+    writeFileSync(BACKTEST_STATE_FILE, JSON.stringify({ collecting: backtestCollecting }, null, 2) + "\n", "utf-8");
+  } catch (err) {
+    console.warn(`[Backtest] 状态保存失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+let backtestCollecting = loadBacktestState();
 let backtestLastTickTs = 0;
+let backtestLastCleanupDate = "";
+const BACKTEST_RETENTION_DAYS = 30;
+
+// 启动时确保数据目录存在（防止首次写入失败）
+if (backtestCollecting) {
+  try { mkdirSync(BACKTEST_DATA_DIR, { recursive: true }); } catch { /* 忽略 */ }
+}
 
 function setBacktestCollecting(enabled: boolean): void {
   backtestCollecting = enabled;
   console.log(`[Backtest] 数据收集${enabled ? "已开启" : "已关闭"}`);
+  persistBacktestState();
   if (enabled) {
     mkdirSync(BACKTEST_DATA_DIR, { recursive: true });
+    cleanupOldBacktestFiles();
   }
   broadcastBacktestStatus();
+}
+
+function cleanupOldBacktestFiles(): void {
+  try {
+    if (!existsSync(BACKTEST_DATA_DIR)) return;
+    const files = readdirSync(BACKTEST_DATA_DIR).filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f));
+    if (files.length <= BACKTEST_RETENTION_DAYS) return;
+    files.sort(); // 按日期字典序升序，旧的在前
+    const toDelete = files.slice(0, files.length - BACKTEST_RETENTION_DAYS);
+    for (const f of toDelete) {
+      try {
+        unlinkSync(resolve(BACKTEST_DATA_DIR, f));
+        console.log(`[Backtest] 已清理旧数据文件: ${f}`);
+      } catch {}
+    }
+  } catch (err) {
+    console.warn(`[Backtest] 清理旧文件失败: ${(err as Error).message}`);
+  }
 }
 
 function broadcastBacktestStatus(): void {
@@ -2493,6 +2611,13 @@ function backtestTick(): void {
   const rem = getStrategyRemainingSeconds(now);
   if (snapshot == null || diff == null || !state.windowStart) return;
 
+  // 每天首次写入时清理旧文件（超过保留天数的）
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (todayStr !== backtestLastCleanupDate) {
+    cleanupOldBacktestFiles();
+    backtestLastCleanupDate = todayStr;
+  }
+
   backtestAppend({
     type: "tick",
     ts: now,
@@ -2504,6 +2629,31 @@ function backtestTick(): void {
   backtestLastTickTs = now;
 }
 
+
+// 事件驱动的策略调度器：短时间内多次事件只触发一次 tick
+let strategyTickScheduled = false;
+let strategyTickLastRunTs = 0;
+const STRATEGY_TICK_MIN_GAP_MS = 10;  // 连续 tick 最小间隔（防止风暴）
+
+function scheduleStrategyTick(): void {
+  if (strategyTickScheduled) return;
+  strategyTickScheduled = true;
+  const now = Date.now();
+  const elapsed = now - strategyTickLastRunTs;
+  if (elapsed >= STRATEGY_TICK_MIN_GAP_MS) {
+    setImmediate(() => {
+      strategyTickScheduled = false;
+      strategyTickLastRunTs = Date.now();
+      runStrategyTick();
+    });
+  } else {
+    setTimeout(() => {
+      strategyTickScheduled = false;
+      strategyTickLastRunTs = Date.now();
+      runStrategyTick();
+    }, STRATEGY_TICK_MIN_GAP_MS - elapsed);
+  }
+}
 
 function runStrategyTick(): void {
   const snapshot = getProbabilitySnapshot();
@@ -2537,6 +2687,10 @@ function runStrategyTick(): void {
   // 更新已启用策略的守卫状态（冷却锁等）
   for (const s of getAllStrategies()) {
     if (strategyConfig.enabled[s.key]) s.updateGuards(ctx);
+    // 策略6 的因子评分作为市场观察数据无论是否启用都要计算
+    else if (s.key === "s6" && "computeFactors" in s && typeof (s as any).computeFactors === "function") {
+      (s as any).computeFactors(ctx);
+    }
   }
 
   if (strategyRuntime.cleanupAfterVerify && strategyRuntime.direction) {
@@ -2744,6 +2898,8 @@ function buildApiStatePayload(): Record<string, unknown> {
     claimCooldown: {
       running: claimCycleRunning || claimInProgress,
       nextCheckAt: claimNextCheckAt,
+      cooldownUntil: claimCooldownUntil,
+      reason: claimLastReason,
     },
   };
 }
@@ -2780,28 +2936,13 @@ app.post("/api/strategy/config", (req, res) => {
   res.json({ success: true, strategyConfig });
 });
 
-// ── REST：Claim 接口 ──────────────────────────────────────────
+// ── REST：Claim 接口（已弃用）────────────────────────────────
+// 自动 Claim 已迁移至 Polymarket 官网（Settings → Auto Redeem）
 app.post("/api/claim", async (_req, res) => {
-  if (!PROXY_ADDRESS || !PRIVATE_KEY) {
-    res.status(500).json({ error: "未配置钱包信息" }); return;
-  }
-  if (claimInProgress) {
-    res.status(429).json({ error: "领取中，请稍候" }); return;
-  }
-  claimNextCheckAt = 0;
-  broadcastClaimCooldown(true);
-  const synced = await syncClaimable({ clearOnError: true });
-  if (!synced) {
-    scheduleClaimCycle();
-    res.status(503).json({ error: "查询可领取仓位失败，请稍后重试" }); return;
-  }
-  if (!claimablePositions.length) {
-    scheduleClaimCycle();
-    res.status(400).json({ error: "暂无可领取资金" }); return;
-  }
-  const results = await runClaim({ refreshAfter: false });
-  scheduleClaimCycle();
-  res.json({ results });
+  res.status(410).json({
+    error: "本地 Claim 功能已移除",
+    hint: "请在 Polymarket 官网 Settings 中开启 Auto Redeem",
+  });
 });
 
 // ── REST：下单接口 ────────────────────────────────────────────
@@ -2825,9 +2966,10 @@ if (wss) {
     send(ws, "clientConfig", { dataMode });
     sendStateToClient(ws, { includeHistory: true });
     sendTradeHistoryToClient(ws);
+    sendPmPnlToClient(ws);
     send(ws, "wsStatus", wsStatus as unknown as Record<string, unknown>);
     send(ws, "claimable", { total: claimableTotal, positions: claimablePositions });
-    send(ws, "claimCooldown", { running: claimCycleRunning || claimInProgress, nextCheckAt: claimNextCheckAt });
+    send(ws, "claimCooldown", { running: claimCycleRunning || claimInProgress, nextCheckAt: claimNextCheckAt, cooldownUntil: claimCooldownUntil, reason: claimLastReason });
     send(ws, "backtestStatus", { collecting: backtestCollecting });
     ws.on("message", (raw) => {
       try {
@@ -2869,7 +3011,25 @@ server.listen(PORT, async () => {
   setInterval(async () => { await syncUsdcBalance(); broadcastState(); }, 5000);
   setInterval(() => { refreshBinanceOffset("定时", { allowLatestFallback: false }); }, BINANCE_ALIGN_REFRESH_MS);
   setInterval(() => { runStrategyTick(); backtestTick(); }, STRATEGY_TICK_MS);
-  scheduleClaimCycle(0);
+  // Claim 功能已移至 Polymarket 官网（Settings → Auto Redeem），本地不再自动执行
+
+  // Polymarket 真实盈亏：启动全量加载 + 每 30 秒增量同步（外部下单也能快速反映）
+  // positions 变化较慢（只在结算时），每 5 分钟同步一次就够
+  pmPnlManager.init().then(() => broadcastPmPnl()).catch((err) => {
+    console.warn(`[PmPnl] 启动加载失败: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  setInterval(async () => {
+    const beforeCount = pmPnlManager.getTotalPnl(0).positionCount;
+    await pmPnlManager.syncIncremental();
+    const afterCount = pmPnlManager.getTotalPnl(0).positionCount;
+    const delta = afterCount - beforeCount;
+    console.log(`[PmPnl] 定时增量 tick: ${delta > 0 ? `+${delta}` : '无新'} 笔（总 ${afterCount}）`);
+    broadcastPmPnl();
+  }, 30 * 1000);
+  setInterval(async () => {
+    await pmPnlManager.syncPositions();
+    broadcastPmPnl();
+  }, 5 * 60 * 1000);
 
   const currentWindow = getCurrentWindowStart();
   fetchRecentResults(currentWindow, true);

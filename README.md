@@ -15,7 +15,7 @@
 | 部署方式 | 仅浏览器 | 本地运行 / 云服务器部署，7×24 无人值守 |
 
 > **注意**：内置策略仅作为框架示例，无法保证稳定盈利。建议根据自身分析自行开发和调整策略。
-
+<img width="1351" height="816" alt="截屏2026-04-21 22 30 59_副本" src="https://github.com/user-attachments/assets/b3f32792-e574-44f6-b299-f5ef86722a26" />
 ## 功能特点
 
 ### 快速下单
@@ -75,8 +75,6 @@ cp .env.example .env
 - `STRATEGY_S{1..5}_ENABLED` / `STRATEGY_S{1..5}_AMOUNT` — 策略开关和金额
 - `ORDER_DEFAULT_SLIPPAGE` — 默认滑点
 - `AUTO_CLAIM_ENABLED` — 自动领取到期仓位
-- `POLY_BUILDER_API_KEY` / `POLY_BUILDER_SECRET` / `POLY_BUILDER_PASSPHRASE` — Claim 走 relayer gasless（推荐）
-- `POLY_BUILDER_CODE` / `POLY_BUILDER_ADDRESS` — 下单 builder attribution（可选；不填则不附带 builder_code）
 
 ### 启动
 
@@ -199,6 +197,23 @@ ssh -L 3456:127.0.0.1:3456 用户名@服务器IP
 欢迎联系交流，一起做出 1+1 > 2 的效果。
 
 **X:** [@188888_x](https://x.com/188888_x)
+
+## 💝 赞助支持
+
+> 无邀请码，用爱发电 ⚡
+
+如蒙老板们慷慨赞助，可打赏至以下地址（Token费太贵了，入不敷出 😂）：
+
+### 🔗 收款地址
+
+| 链 / Chain | 地址 / Address |
+| :--- | :--- |
+| **EVM 全链** | `0x0D71D55aF87fb297D4eE7b15acEE37572e34AC91` |
+| **Solana (SOL)** | `5JNfS3cyFKkWmoV7KfpYtN7vYE7LnZaGYF2gd8ZTpCUR` |
+
+---
+
+> 🙏 感谢每一位支持者，你们的赞助是持续更新的动力！
 
 ## 许可
 

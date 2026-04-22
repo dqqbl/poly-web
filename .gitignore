@@ -8,6 +8,8 @@ node_modules/
 # 运行时数据
 .trade-history.json
 .strategy-config.json
+.strategy-sources.json
+.backtest-state.json
 backtest-data/*.jsonl
 backtest-data/.DS_Store
 

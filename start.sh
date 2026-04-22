@@ -11,6 +11,30 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+# 自动安装 Node.js（仅 Linux，macOS 通常已装）
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  if [ "$(uname -s)" = "Linux" ]; then
+    echo "未检测到 Node.js，正在自动安装 Node.js 20..."
+    if ! command -v curl >/dev/null 2>&1; then
+      sudo apt-get update && sudo apt-get install -y curl
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+      sudo apt-get install -y nodejs
+    elif command -v yum >/dev/null 2>&1; then
+      curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+      sudo yum install -y nodejs
+    else
+      echo "无法识别包管理器，请手动安装 Node.js 20+ 后重试"
+      exit 1
+    fi
+    echo "Node.js 安装完成：$(node -v)"
+  else
+    echo "未找到 Node.js 或 npm，请先安装 Node.js 20+（访问 https://nodejs.org）"
+    exit 1
+  fi
+fi
+
 # 安装依赖
 if [ ! -d node_modules ]; then
   echo "正在安装依赖..."
