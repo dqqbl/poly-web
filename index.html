@@ -1058,8 +1058,8 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 
 </div>
 
-<!-- 买卖记录栏（已由下方「真实盈亏 · Polymarket」替代，保留 DOM 以兼容现有逻辑，隐藏显示） -->
-<div id="signal-history" style="display:none">
+<!-- 买卖记录：与下方「真实盈亏」数据源不同；本栏为本地 WS/MINED 汇总的快捷流水 -->
+<div id="signal-history">
   <div class="hist-title">买卖记录</div>
   <div id="signal-history-list"><div style="color:#444;font-size:12px">暂无记录</div></div>
 </div>
@@ -2285,7 +2285,7 @@ async function initStrategyUI() {
     container.innerHTML = '';
     // 按类型分组
     const categories = [
-      { label: '差价', color: '#58a6ff', keys: ['s1', 's2', 's3'] },
+      { label: '差价', color: '#58a6ff', keys: ['s1', 's2', 's3', 's6'] },
       { label: '反转', color: '#d2a8ff', keys: ['s4'] },
       { label: '概率追赶', color: '#f0a500', keys: ['s5'] },
     ];

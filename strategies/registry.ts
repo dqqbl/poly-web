@@ -9,11 +9,19 @@ import { S2Regular } from "./s2.js";
 import { S3Sweep } from "./s3.js";
 import { S4Reversal } from "./s4.js";
 import { S5ProbChase } from "./s5.js";
+import { S6EarlySweep } from "./s6.js";
 
 const strategies: Map<StrategyKey, IStrategy> = new Map();
 
 export function registerAllStrategies(): void {
-  const all: IStrategy[] = [new S1Enhanced(), new S2Regular(), new S3Sweep(), new S4Reversal(), new S5ProbChase()];
+  const all: IStrategy[] = [
+    new S1Enhanced(),
+    new S2Regular(),
+    new S3Sweep(),
+    new S4Reversal(),
+    new S5ProbChase(),
+    new S6EarlySweep(),
+  ];
   for (const s of all) strategies.set(s.key, s);
 }
 
