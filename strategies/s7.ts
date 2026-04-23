@@ -10,8 +10,8 @@ import type {
 
 const WINDOW_MAX_REMAINING = 90;
 const ENTRY_PROB_CAP = 90;
-/** rem>90 阶段未采到该方向峰值时，回退为与 s6 相同的固定门槛 */
-const FALLBACK_ENTRY_DIFF = 10;
+/** diff 入场门槛下限；动态阈值 max(本值, 峰值×比例) */
+const MIN_ENTRY_DIFF = 10;
 const PEAK_FRACTION = 0.3;
 
 interface S7State {
@@ -40,8 +40,8 @@ export class S7PeakSweep implements IStrategy {
         { text: `⏱ rem>${WINDOW_MAX_REMAINING}s 时记录峰值；剩余≤${WINDOW_MAX_REMAINING}s 时检测入场` },
         { text: `📈 涨侧峰值 up_max：rem>90 期间 diff>0 时的最大 diff` },
         { text: `📉 跌侧峰值 down_max：rem>90 期间 diff<0 时的最大 |diff|` },
-        { text: `入场：diff > up_max×${PEAK_FRACTION} 且 涨概率<${ENTRY_PROB_CAP}%（跌对称）`, marginTop: true },
-        { text: `若某侧未采到峰值，该侧门槛回退为 ±${FALLBACK_ENTRY_DIFF}（同 s6）`, color: "#888" },
+        { text: `入场：diff > max(${MIN_ENTRY_DIFF}, up_max×${PEAK_FRACTION})，涨概率<${ENTRY_PROB_CAP}%（跌对称）`, marginTop: true },
+        { text: `若某侧未采到峰值，该侧仅用下限 ±${MIN_ENTRY_DIFF}`, color: "#888" },
         { text: "止盈：>40s ≥98% / >20s ≥99% / >10s ≥100% / <10s 持仓到结束", color: "#3fb950", marginTop: true },
         { text: "无 diff 止损", color: "#888" },
       ],
@@ -61,11 +61,13 @@ export class S7PeakSweep implements IStrategy {
   }
 
   private upEntryThreshold(): number {
-    return this.s.upMaxDiff > 0 ? this.s.upMaxDiff * PEAK_FRACTION : FALLBACK_ENTRY_DIFF;
+    if (this.s.upMaxDiff <= 0) return MIN_ENTRY_DIFF;
+    return Math.max(MIN_ENTRY_DIFF, this.s.upMaxDiff * PEAK_FRACTION);
   }
 
   private downEntryThreshold(): number {
-    return this.s.downMaxDiff > 0 ? this.s.downMaxDiff * PEAK_FRACTION : FALLBACK_ENTRY_DIFF;
+    if (this.s.downMaxDiff <= 0) return MIN_ENTRY_DIFF;
+    return Math.max(MIN_ENTRY_DIFF, this.s.downMaxDiff * PEAK_FRACTION);
   }
 
   checkEntry(ctx: StrategyTickContext): EntrySignal | null {
