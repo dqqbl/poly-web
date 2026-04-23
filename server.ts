@@ -193,6 +193,19 @@ const PENDING_TRADE_META_MAX_AGE_MS = 15 * 60 * 1000;
 
 const PRIVATE_KEY   = process.env.POLYMARKET_PRIVATE_KEY || "";
 const PROXY_ADDRESS = process.env.POLYMARKET_PROXY_ADDRESS || "";
+
+/** Builder 归因 bytes32（Polymarket 设置 → Builder）。未设置则不附带。 */
+function resolveClobBuilderConfig(): { builderCode: string } | undefined {
+  const raw = (process.env.POLYMARKET_BUILDER_CODE ?? process.env.POLY_BUILDER_CODE ?? "").trim();
+  if (!raw) return undefined;
+  return { builderCode: raw };
+}
+
+const CLOB_BUILDER_CONFIG = resolveClobBuilderConfig();
+if (CLOB_BUILDER_CONFIG) {
+  console.log("[Auth] 已配置 Polymarket builder 归因（订单将带 builderCode）");
+}
+
 const APP_MODE: AppMode = process.env.APP_MODE === "headless" ? "headless" : "full";
 const IS_FULL_MODE = APP_MODE === "full";
 
@@ -550,15 +563,22 @@ function loadCreds(): PolymarketCreds | null {
 async function createClobClient(): Promise<ClobClient | null> {
   const sigType = PROXY_ADDRESS ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA;
   const funderAddress = PROXY_ADDRESS || undefined;
+  const baseOpts = {
+    host: CLOB_URL,
+    chain: Chain.POLYGON,
+    signatureType: sigType,
+    funderAddress,
+    ...(CLOB_BUILDER_CONFIG ? { builderConfig: CLOB_BUILDER_CONFIG } : {}),
+  };
   const saved   = loadCreds();
 
   if (saved) {
     const creds = { key: saved.key, secret: saved.secret, passphrase: saved.passphrase };
     if (PRIVATE_KEY) {
       const signer = adaptSigner(new ethers.Wallet(PRIVATE_KEY)) as any;
-      return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
+      return new ClobClient({ ...baseOpts, signer, creds });
     }
-    return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, creds, signatureType: sigType, funderAddress });
+    return new ClobClient({ ...baseOpts, creds });
   }
 
   if (!PRIVATE_KEY) {
@@ -569,11 +589,11 @@ async function createClobClient(): Promise<ClobClient | null> {
   console.log("[Auth] 首次使用，通过私钥生成 Polymarket API 凭证...");
   const wallet = new ethers.Wallet(PRIVATE_KEY);
   const signer = adaptSigner(wallet) as any;
-  const client = new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, signatureType: sigType, funderAddress });
+  const client = new ClobClient({ ...baseOpts, signer });
   const creds  = await client.createOrDeriveApiKey();
   writeFileSync(CREDS_FILE, JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase, address: wallet.address }, null, 2));
   console.log("[Auth] 凭证已保存到 .polymarket-creds.json");
-  return new ClobClient({ host: CLOB_URL, chain: Chain.POLYGON, signer, creds, signatureType: sigType, funderAddress });
+  return new ClobClient({ ...baseOpts, signer, creds });
 }
 
 // ── HTTP 服务 ─────────────────────────────────────────────────

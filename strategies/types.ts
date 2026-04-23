@@ -5,8 +5,8 @@
 // ── 策略注册（添加/删除策略只需改这里）─────────────────────
 // 添加策略：在 ALL_STRATEGY_KEYS 加 key，在 ALL_STRATEGY_NUMBERS 加 number
 // StrategyKey 和 StrategyNumber 会自动从数组推导
-export const ALL_STRATEGY_KEYS = ["s1", "s2", "s3", "s4", "s5", "s6"] as const;
-export const ALL_STRATEGY_NUMBERS = [1, 2, 3, 4, 5, 6] as const;
+export const ALL_STRATEGY_KEYS = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"] as const;
+export const ALL_STRATEGY_NUMBERS = [1, 2, 3, 4, 5, 6, 7] as const;
 
 export type StrategyKey = typeof ALL_STRATEGY_KEYS[number];
 export type StrategyNumber = typeof ALL_STRATEGY_NUMBERS[number];

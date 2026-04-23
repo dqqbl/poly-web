@@ -10,6 +10,7 @@ import { S3Sweep } from "./s3.js";
 import { S4Reversal } from "./s4.js";
 import { S5ProbChase } from "./s5.js";
 import { S6EarlySweep } from "./s6.js";
+import { S7PeakSweep } from "./s7.js";
 
 const strategies: Map<StrategyKey, IStrategy> = new Map();
 
@@ -21,6 +22,7 @@ export function registerAllStrategies(): void {
     new S4Reversal(),
     new S5ProbChase(),
     new S6EarlySweep(),
+    new S7PeakSweep(),
   ];
   for (const s of all) strategies.set(s.key, s);
 }
