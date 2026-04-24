@@ -1,6 +1,6 @@
 /**
  * 策略7 · 峰值阈扫尾 — 基于策略6：rem>90 时记录涨跌方向各自峰值 diff，
- * rem≤90 后需 diff 突破该方向峰值的 30% 才入场（其余同 s6）
+ * rem≤90 后需 diff 突破该方向峰值的 30% 才入场；diff 下限 15（高于 s6 的 10）
  */
 
 import type {
@@ -11,7 +11,7 @@ import type {
 const WINDOW_MAX_REMAINING = 90;
 const ENTRY_PROB_CAP = 90;
 /** diff 入场门槛下限；动态阈值 max(本值, 峰值×比例) */
-const MIN_ENTRY_DIFF = 10;
+const MIN_ENTRY_DIFF = 15;
 const PEAK_FRACTION = 0.3;
 
 interface S7State {
