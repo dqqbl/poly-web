@@ -480,6 +480,46 @@ function getDirectionByAssetId(assetId: string): StrategyDirection | null {
   return null;
 }
 
+/**
+ * GTC 跟卖：必须用 pending 里的 direction 对应的真实 outcome tokenId。
+ * Maker 买单成交时 UserWS 常先推 side=SELL（对手 taker 卖出）；另一条 leg 的 MINED 可能是互补 token，价格满足 p + (1-p) = 1，份额与 outcome 不一定同数值，互补腿时用 pending 下单股数更稳。
+ */
+function resolveGtcFollowOutcomeFill(input: {
+  direction: StrategyDirection;
+  evtAssetId: string;
+  evtPrice: number;
+  evtSize: number;
+  pendingWorstPrice: number;
+  pendingAmount: number;
+}): { tokenId: string; fillPrice: number; wsFillSize: number } | null {
+  const { direction, evtAssetId, evtPrice, evtSize, pendingWorstPrice, pendingAmount } = input;
+  const up = state.upTokenId;
+  const down = state.downTokenId;
+  const outcomeId = direction === "up" ? up : down;
+  if (!outcomeId) return null;
+
+  const oppositeId = direction === "up" ? down : up;
+  let fillPrice = evtPrice;
+  let wsFillSize = evtSize;
+
+  if (evtAssetId === outcomeId) {
+    // WS 已落在买的 outcome 上
+  } else if (oppositeId && evtAssetId === oppositeId && Number.isFinite(evtPrice) && evtPrice > 0 && evtPrice < 1) {
+    fillPrice = 1 - evtPrice;
+    wsFillSize = pendingAmount;
+  } else {
+    fillPrice = pendingWorstPrice;
+    wsFillSize = pendingAmount;
+  }
+
+  if (!Number.isFinite(fillPrice) || fillPrice <= 0) fillPrice = pendingWorstPrice;
+  if (!Number.isFinite(wsFillSize) || wsFillSize <= 0) wsFillSize = pendingAmount;
+
+  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !Number.isFinite(wsFillSize) || wsFillSize <= 0) return null;
+
+  return { tokenId: outcomeId, fillPrice, wsFillSize };
+}
+
 function parseTradeEventTimestamp(evt: Record<string, unknown>): number {
   const raw = typeof evt.match_time === "string"
     ? evt.match_time
@@ -1421,21 +1461,31 @@ function startUserWs(): void {
           broadcastState();
 
           if (
-            side === "buy"
+            pendingMeta?.side === "buy"
             && gtcFollowBuyDelta != null
             && pendingMeta?.source === "manual-gtc"
-            && Number.isFinite(price)
-            && Number.isFinite(size)
             && direction
           ) {
-            void placeGtcFollowupSellAfterBuy({
-              tokenId: assetId,
+            const resolved = resolveGtcFollowOutcomeFill({
               direction,
-              fillPrice: price,
-              wsFillSize: size,
-              priceBump: gtcFollowBuyDelta,
-              txHash,
+              evtAssetId: assetId,
+              evtPrice: price,
+              evtSize: size,
+              pendingWorstPrice: pendingMeta.worstPrice,
+              pendingAmount: pendingMeta.amount,
             });
+            if (resolved) {
+              void placeGtcFollowupSellAfterBuy({
+                tokenId: resolved.tokenId,
+                direction,
+                fillPrice: resolved.fillPrice,
+                wsFillSize: resolved.wsFillSize,
+                priceBump: gtcFollowBuyDelta,
+                txHash,
+              });
+            } else {
+              console.warn("[Order:manual-gtc-follow] 无法解析 outcome 成交价/份额，跳过跟卖");
+            }
           }
 
           // 买入后异步链上校准：WS 推送的 size 有 ~1% 偏差，用链上真实值修正
