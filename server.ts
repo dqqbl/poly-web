@@ -104,7 +104,7 @@ interface PendingTradeMeta {
   source: string;
   exitReason?: string;
   roundEntry?: string;
-  /** 若为 GTC 买单挂出且用户开启「快捷」：MINED 后再挂一张 GTC 买，价位 = 成交价 + 此值 */
+  /** GTC 买单成交且用户开启「快捷卖出」：再挂 GTC 卖单，卖一价 = 买单成交价 + 此值；份额用链上真实成交并略缩 */
   gtcFollowBuyDelta?: number;
 }
 
@@ -1427,12 +1427,13 @@ function startUserWs(): void {
             && Number.isFinite(size)
             && direction
           ) {
-            void placeGtcFollowupBuy({
+            void placeGtcFollowupSellAfterBuy({
               tokenId: assetId,
               direction,
               fillPrice: price,
-              fillSize: size,
+              wsFillSize: size,
               priceBump: gtcFollowBuyDelta,
+              txHash,
             });
           }
 
@@ -2544,6 +2545,8 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
 
 const GTC_LIMIT_OFFSETS = [0.02, 0.1, 0.3] as const;
 const GTC_FOLLOW_BUMP_VALUES = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3] as const;
+/** 跟卖份额 = min(链上或WS成交, 本地仓) × 此系数，略小于真实可卖，减少拒单 */
+const GTC_FOLLOW_SELL_SIZE_FACTOR = 0.997;
 
 function isNearAllowedOffset(value: number, allowed: readonly number[]): boolean {
   return allowed.some((a) => Math.abs(a - value) < 1e-5);
@@ -2566,55 +2569,76 @@ interface PlaceGtcOrderInput {
   source?: string;
 }
 
-async function placeGtcFollowupBuy(args: {
+/** GTC 买单 MINED 后：挂限价卖（止盈），份额优先链上 TransferSingle，并与本地仓位取小后再略缩 */
+async function placeGtcFollowupSellAfterBuy(args: {
   tokenId: string;
   direction: StrategyDirection;
   fillPrice: number;
-  fillSize: number;
+  wsFillSize: number;
   priceBump: number;
+  txHash?: string;
 }): Promise<void> {
   const tag = "[Order:manual-gtc-follow]";
-  const { tokenId, direction, fillPrice, fillSize, priceBump } = args;
+  const { tokenId, direction, fillPrice, wsFillSize, priceBump, txHash } = args;
   if (!(await ensureClobClient())) {
-    console.warn(`${tag} CLOB 未初始化，跳过跟单`);
+    console.warn(`${tag} CLOB 未初始化，跳过跟卖`);
     return;
   }
   if (isOrderWindowStale()) {
-    console.warn(`${tag} 窗口已过期，跳过跟单`);
+    console.warn(`${tag} 窗口已过期，跳过跟卖`);
     return;
   }
-  if (!Number.isFinite(fillPrice) || !Number.isFinite(fillSize) || fillSize <= 0) return;
+  if (!Number.isFinite(fillPrice) || !Number.isFinite(wsFillSize) || wsFillSize <= 0) return;
+
+  let baseShares = wsFillSize;
+  if (txHash && PROXY_ADDRESS) {
+    const chain = await getRealFillFromTx(txHash, PROXY_ADDRESS);
+    if (chain != null && Number.isFinite(chain) && chain > 0) {
+      baseShares = chain;
+      console.log(`${tag} 链上成交份额 ${chain}（WS ${wsFillSize}）`);
+    } else {
+      console.log(`${tag} 链上查询失败，跟卖份额暂用 WS ${wsFillSize}`);
+    }
+  }
+
+  const localAvail = positions.localSize[tokenId] ?? 0;
+  const capped = Math.min(baseShares, localAvail);
+  const sellSize = floorToDecimals(capped * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
+
+  if (!(sellSize > 0)) {
+    console.warn(`${tag} 跟卖份额无效 base:${baseShares} local:${localAvail} capped:${capped}`);
+    return;
+  }
+
   try {
     const tickSize = await clobClient!.getTickSize(tokenId);
     const negRisk = await clobClient!.getNegRisk(tokenId);
     const priceDecimals = getDecimalPlaces(tickSize);
     const rawLimit = fillPrice + priceBump;
     const limitPrice = floorToDecimals(Math.min(0.99, Math.max(0.01, rawLimit)), priceDecimals);
-    const normalizedSize = floorToDecimals(fillSize, 2);
-    if (normalizedSize <= 0 || limitPrice <= 0) {
-      console.warn(`${tag} 跟单参数无效 size:${normalizedSize} price:${limitPrice}`);
+    if (limitPrice <= 0) {
+      console.warn(`${tag} 跟卖限价无效 ${limitPrice}`);
       return;
     }
     const result = await clobClient!.createAndPostOrder(
-      { tokenID: tokenId, side: Side.BUY, price: limitPrice, size: normalizedSize },
+      { tokenID: tokenId, side: Side.SELL, price: limitPrice, size: sellSize },
       { tickSize, negRisk },
       OrderType.GTC,
     );
     const orderError = extractOrderError(result);
     if (result?.status === 400 || orderError) {
-      console.warn(`${tag} 跟单失败: ${orderError || result?.status || "unknown"}`);
+      console.warn(`${tag} 跟卖失败: ${orderError || result?.status || "unknown"}`);
       return;
     }
-    const sideZh = "买入";
     const dirZh = direction === "up" ? "涨" : "跌";
-    console.log(`${tag} ${sideZh}${dirZh} ${normalizedSize} @${limitPrice} 状态:${result?.status ?? "unknown"}`);
+    console.log(`${tag} 卖出${dirZh} ${sellSize} @${limitPrice} 状态:${result?.status ?? "unknown"}`);
     rememberPendingTradeMeta({
       orderId: typeof result?.orderID === "string" && result.orderID ? result.orderID : undefined,
       ts: Date.now(),
       windowStart: state.windowStart,
-      side: "buy",
+      side: "sell",
       direction,
-      amount: normalizedSize,
+      amount: sellSize,
       worstPrice: limitPrice,
       source: "manual-gtc-follow",
     });

@@ -1196,7 +1196,7 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
       <div class="input-row">
         <button type="button" class="step-btn" onclick="stepGtcShares(-1)">−</button>
         <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
-          <input type="number" id="gtc-shares-input" value="5" placeholder="0" min="0" step="0.1"
+          <input type="number" id="gtc-shares-input" value="6" placeholder="0" min="0" step="0.1"
                  oninput="updateGtcEst()" style="width:100%;text-align:center">
           <span style="font-size:13px;font-weight:700;color:#555;line-height:1">份</span>
         </div>
@@ -1210,7 +1210,7 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     </div>
 
     <div id="gtc-follow-block" class="disabled">
-      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后以成交价 + 选项挂 GTC 买）</span></div>
+      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后按链上真实份额略缩，以成交价 + 选项挂 GTC <b>卖</b>）</span></div>
       <div class="gtc-choice-row gtc-choice-row-wide" id="gtc-follow-chips">
         <button type="button" class="tog-btn gtc-choice on" data-bump="0.05" onclick="gtcPickFollowDelta(0.05)">+0.05</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="gtcPickFollowDelta(0.1)">+0.1</button>
