@@ -106,6 +106,8 @@ interface PendingTradeMeta {
   roundEntry?: string;
   /** GTC 买单成交且用户开启「快捷卖出」：再挂 GTC 卖单，卖一价 = 买单成交价 + 此值；份额用链上真实成交并略缩 */
   gtcFollowBuyDelta?: number;
+  /** 市价买单成交且用户开启「快捷卖出」：监听 bestBid，触及 entryPrice + 此值时自动市价卖出 */
+  marketFollowBuyDelta?: number;
 }
 
 interface ClientSession {
@@ -809,6 +811,106 @@ const positions = {
   lastTradeAt: null as number | null,
   lastApiSyncAt: null as number | null,
 };
+
+// ── 市价快捷卖出（止盈） ──────────────────────────────────────
+interface MarketFollowSell {
+  tokenId: string;
+  direction: StrategyDirection;
+  entryPrice: number;
+  followDelta: number;
+  shares: number;
+  orderId?: string;
+  txHash?: string;
+  createdAt: number;
+  triggered: boolean;
+  windowStart: number;
+}
+/** 市价买单成交后注册的待触发卖出任务；由 bestBid/bestAsk 更新驱动 */
+const marketFollowSells: MarketFollowSell[] = [];
+const MARKET_FOLLOW_MAX_AGE_MS = 10 * 60 * 1000; // 10 分钟过期
+
+function pruneMarketFollowSells(windowStart?: number): void {
+  const now = Date.now();
+  for (let i = marketFollowSells.length - 1; i >= 0; i--) {
+    const m = marketFollowSells[i];
+    if (m.triggered || now - m.createdAt > MARKET_FOLLOW_MAX_AGE_MS || (windowStart != null && m.windowStart !== windowStart)) {
+      marketFollowSells.splice(i, 1);
+    }
+  }
+}
+
+function registerMarketFollowSell(item: Omit<MarketFollowSell, "createdAt" | "triggered">): void {
+  pruneMarketFollowSells();
+  marketFollowSells.push({ ...item, createdAt: Date.now(), triggered: false });
+  const dirZh = item.direction === "up" ? "涨" : "跌";
+  console.log(
+    `[MarketFollow] 注册止盈卖出 ${dirZh} entry=${item.entryPrice.toFixed(4)} ` +
+    `trigger>=${(item.entryPrice + item.followDelta).toFixed(4)} shares=${item.shares.toFixed(2)}`
+  );
+}
+
+async function executeMarketFollowSell(item: MarketFollowSell): Promise<void> {
+  const tag = "[MarketFollow]";
+  if (item.triggered) return;
+  item.triggered = true;
+  if (isOrderWindowStale()) {
+    console.warn(`${tag} 窗口已过期，跳过止盈卖出`);
+    return;
+  }
+  const tokenId = item.tokenId;
+  let sellSize = item.shares;
+  // 卖出前查询真实 conditional token balance
+  try {
+    const balResp = (await clobClient!.getBalanceAllowance({
+      asset_type: AssetType.CONDITIONAL,
+      token_id: tokenId,
+    })) as { balance?: string } | null;
+    if (balResp && balResp.balance != null) {
+      const bal = parseFloat(balResp.balance) / 1e6;
+      const safe = Math.floor(bal * 0.997 * 100) / 100;
+      if (safe < sellSize) {
+        console.log(`${tag} 条件余额 ${bal.toFixed(4)} < 目标 ${sellSize.toFixed(2)}，缩至 ${safe.toFixed(2)}`);
+        sellSize = safe;
+      }
+    }
+  } catch (e) {
+    console.warn(`${tag} 查询余额失败:`, e instanceof Error ? e.message : String(e));
+  }
+  if (sellSize <= 0.001) {
+    console.warn(`${tag} 卖量不足，放弃止盈`);
+    return;
+  }
+  const dirZh = item.direction === "up" ? "涨" : "跌";
+  console.log(`${tag} 触发市价止盈卖出 ${dirZh} ${sellSize.toFixed(2)} @ bestBid 当前触发价>=${(item.entryPrice + item.followDelta).toFixed(4)}`);
+  const result = await placeOrder({
+    direction: item.direction,
+    side: "sell",
+    amount: sellSize,
+    source: "manual-market-follow",
+  });
+  if (result.success) {
+    console.log(`${tag} 止盈卖出成功`);
+  } else {
+    console.warn(`${tag} 止盈卖出失败:`, result.errorMessage || result.body?.error || "unknown");
+  }
+}
+
+/** 在 bestBid/bestAsk 更新后调用，检查是否有市价止盈任务应触发 */
+function checkMarketFollowSells(): void {
+  pruneMarketFollowSells();
+  if (marketFollowSells.length === 0) return;
+  const upBid = parseFloat(String(state.bestBid));
+  const downBid = parseFloat(String(state.downBestBid));
+  for (const item of marketFollowSells) {
+    if (item.triggered) continue;
+    const currentBid = item.direction === "up" ? upBid : downBid;
+    if (!Number.isFinite(currentBid) || currentBid <= 0) continue;
+    const triggerPrice = item.entryPrice + item.followDelta;
+    if (currentBid >= triggerPrice) {
+      void executeMarketFollowSell(item);
+    }
+  }
+}
 
 // ── 广播 ──────────────────────────────────────────────────────
 function send(ws: WebSocket, type: string, data: Record<string, unknown>): void {
@@ -1547,6 +1649,7 @@ function startUserWs(): void {
           );
           broadcastState();
 
+          // GTC 快捷卖出（挂单）
           if (
             pendingMeta?.side === "buy"
             && gtcFollowBuyDelta != null
@@ -1574,6 +1677,46 @@ function startUserWs(): void {
             } else {
               console.warn("[Order:manual-gtc-follow] 无法解析 outcome 成交价/份额，跳过跟卖");
             }
+          }
+
+          // 市价快捷卖出（监听 bestBid 触发市价止盈）
+          if (
+            pendingMeta?.side === "buy"
+            && pendingMeta?.marketFollowBuyDelta != null
+            && pendingMeta?.source === "manual"
+            && direction
+            && positionTokenId
+          ) {
+            const entryPrice = Number.isFinite(price) && price > 0 ? price : pendingMeta.worstPrice;
+            const followDelta = pendingMeta.marketFollowBuyDelta;
+            const initialShares = size;
+            registerMarketFollowSell({
+              tokenId: positionTokenId,
+              direction,
+              entryPrice,
+              followDelta,
+              shares: initialShares,
+              orderId,
+              txHash,
+              windowStart: pendingMeta.windowStart,
+            });
+            // 异步校准真实成交份额
+            void (async () => {
+              let realShares: number | null = null;
+              if (txHash && PROXY_ADDRESS) {
+                realShares = await getRealFillFromTx(txHash, PROXY_ADDRESS);
+              }
+              if (realShares == null && orderId) {
+                realShares = await fetchOrderSizeMatched(orderId);
+              }
+              if (realShares != null && realShares > 0) {
+                const item = marketFollowSells.find((m) => m.orderId === orderId && !m.triggered);
+                if (item) {
+                  item.shares = realShares;
+                  console.log(`[MarketFollow] 校准 shares ${initialShares} → ${realShares} order:${orderId?.slice(0, 10) ?? "-"}`);
+                }
+              }
+            })();
           }
 
           // 买入后异步链上校准：WS 推送的 size 有 ~1% 偏差，用链上真实值修正
@@ -1651,6 +1794,7 @@ function applyBestBidAskUpdate(
   state.bestBid = bestBid;
   state.bestAsk = bestAsk;
   marketBestReady = true;
+  checkMarketFollowSells(); // 检查市价止盈任务
   scheduleStrategyTick();  // 盘口更新（概率变化）立即触发策略检查
   return true;
 }
@@ -1667,6 +1811,7 @@ function applyDownBestBidAskUpdate(
   if (ts > 0) lastDownBestBidAskTimestamp = ts;
   state.downBestBid = bestBid;
   state.downBestAsk = bestAsk;
+  checkMarketFollowSells(); // 检查市价止盈任务
   return true;
 }
 
@@ -2198,6 +2343,7 @@ async function subscribeWindow(windowStart: number): Promise<void> {
     strategyRuntime.positionsReady = !PROXY_ADDRESS;
     resetStrategyRuntime(`切换到窗口 ${windowStart}`);
     prunePositionCaches([info.upTokenId, info.downTokenId]);
+    pruneMarketFollowSells(windowStart);
     positions.localSize[info.upTokenId]     = 0;
     positions.localSize[info.downTokenId]   = 0;
     positions.apiSize[info.upTokenId]       = 0;
@@ -2549,6 +2695,8 @@ interface PlaceOrderInput {
   source?: string;
   exitReason?: string;
   roundEntry?: string;
+  /** 市价买入时：成交后监听价格，触及 entryPrice + 此值时自动市价卖出 */
+  followBuyDelta?: number | null;
 }
 
 interface OrderExecutionResult {
@@ -2669,6 +2817,7 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
       source,
       exitReason: input.exitReason,
       roundEntry: input.roundEntry,
+      ...(input.followBuyDelta != null ? { marketFollowBuyDelta: input.followBuyDelta } : {}),
     });
     if (!(typeof result?.orderID === "string" && result.orderID)) {
       console.warn(`${orderTag} 下单回包缺少 orderID，MINED 事件将退化为按方向/数量匹配`);
@@ -3587,13 +3736,14 @@ app.post("/api/claim", async (_req, res) => {
 
 // ── REST：下单接口 ────────────────────────────────────────────
 app.post("/api/order", async (req, res) => {
-  const { direction, side, amount, slippage } = req.body as {
+  const { direction, side, amount, slippage, followBuyDelta } = req.body as {
     direction: "up" | "down";
     side: "buy" | "sell";
     amount: number;
     slippage?: number;
+    followBuyDelta?: number | null;
   };
-  const result = await placeOrder({ direction, side, amount, slippage, source: "manual" });
+  const result = await placeOrder({ direction, side, amount, slippage, followBuyDelta: followBuyDelta ?? null, source: "manual" });
   res.status(result.statusCode).json(result.body);
 });
 

@@ -1147,6 +1147,19 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     <!-- 结果 -->
     <div id="order-result"></div>
 
+    <!-- 市价快捷卖出 -->
+    <div id="market-follow-block" class="disabled">
+      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后监听 bestBid，触及成交价 + 选项自动市价卖出）</span></div>
+      <div class="gtc-choice-row gtc-choice-row-wide" id="market-follow-chips">
+        <button type="button" class="tog-btn gtc-choice on" data-bump="0.05" onclick="pickMarketFollowDelta(0.05)">+0.05</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="pickMarketFollowDelta(0.1)">+0.1</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.15" onclick="pickMarketFollowDelta(0.15)">+0.15</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.2" onclick="pickMarketFollowDelta(0.2)">+0.2</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.25" onclick="pickMarketFollowDelta(0.25)">+0.25</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.3" onclick="pickMarketFollowDelta(0.3)">+0.3</button>
+      </div>
+    </div>
+
     <!-- 滑点 -->
     <div>
       <div style="font-size:12px;color:#777;margin-bottom:5px">滑点保护 <span style="font-size:11px;color:#666">（买+/卖-）</span></div>
@@ -1791,6 +1804,9 @@ let curUpVerified = false, curDnVerified = false;
 let curLastTradeAt = 0;
 let selDir = null;   // 'up' | 'down'
 let selSide = null;  // 'buy' | 'sell'
+
+// 市价面板状态
+let marketFollowDelta = 0.05;
 
 // GTC 面板状态
 let gtcSelDir = null;
@@ -2623,6 +2639,8 @@ function setSide(s) {
   selSide = s;
   document.getElementById('btn-buy').className  = 'side-btn' + (s==='buy'  ? ' active-buy'  : '');
   document.getElementById('btn-sell').className = 'side-btn' + (s==='sell' ? ' active-sell' : '');
+  const followBlock = document.getElementById('market-follow-block');
+  if (followBlock) followBlock.classList.toggle('disabled', s !== 'buy');
   updatePanel();
 }
 
@@ -2804,6 +2822,14 @@ function gtcPickLimitDelta(v) {
 function gtcPickFollowDelta(v) {
   gtcFollowDelta = v;
   document.querySelectorAll('#gtc-follow-chips .gtc-choice').forEach((el) => {
+    const dv = parseFloat(el.getAttribute('data-bump') || '');
+    el.classList.toggle('on', Math.abs(dv - v) < 1e-6);
+  });
+}
+
+function pickMarketFollowDelta(v) {
+  marketFollowDelta = v;
+  document.querySelectorAll('#market-follow-chips .gtc-choice').forEach((el) => {
     const dv = parseFloat(el.getAttribute('data-bump') || '');
     el.classList.toggle('on', Math.abs(dv - v) < 1e-6);
   });
@@ -2998,7 +3024,13 @@ async function submitOrder() {
     const res = await fetch('/api/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ direction: selDir, side: selSide, amount, slippage: parseFloat(document.getElementById('slippage-input').value) || 0.05 }),
+      body: JSON.stringify({
+        direction: selDir,
+        side: selSide,
+        amount,
+        slippage: parseFloat(document.getElementById('slippage-input').value) || 0.05,
+        followBuyDelta: selSide === 'buy' ? marketFollowDelta : null,
+      }),
     });
     const data = await res.json();
     if (res.ok && data.success) {
