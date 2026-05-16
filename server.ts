@@ -1511,11 +1511,15 @@ function startUserWs(): void {
           const txHash = typeof evt.transaction_hash === "string" && evt.transaction_hash
             ? evt.transaction_hash
             : undefined;
-          if (!(assetId in positions.localSize)) positions.localSize[assetId] = 0;
-          positions.localSize[assetId] = side === "buy"
-            ? positions.localSize[assetId] + size
-            : Math.max(0, positions.localSize[assetId] - size);
-          positions.apiVerified[assetId] = false;
+          // WS 事件可能落在互补 token 上，仓位必须更新到实际买入的 outcome token
+          const positionTokenId = direction ? getDirectionTokenId(direction) : assetId;
+          if (positionTokenId) {
+            if (!(positionTokenId in positions.localSize)) positions.localSize[positionTokenId] = 0;
+            positions.localSize[positionTokenId] = side === "buy"
+              ? positions.localSize[positionTokenId] + size
+              : Math.max(0, positions.localSize[positionTokenId] - size);
+            positions.apiVerified[positionTokenId] = false;
+          }
           positions.lastTradeAt = parseTradeEventTimestamp(evt);
           if (direction && Number.isFinite(price) && price > 0) {
             recordTradeHistory({
@@ -1573,9 +1577,8 @@ function startUserWs(): void {
           }
 
           // 买入后异步链上校准：WS 推送的 size 有 ~1% 偏差，用链上真实值修正
-          if (side === "buy" && txHash && PROXY_ADDRESS) {
+          if (side === "buy" && txHash && PROXY_ADDRESS && positionTokenId) {
             const wsSize = size;
-            const targetAssetId = assetId;
             void (async () => {
               const realFill = await getRealFillFromTx(txHash, PROXY_ADDRESS);
               if (realFill == null) {
@@ -1584,13 +1587,13 @@ function startUserWs(): void {
               }
               const delta = realFill - wsSize;
               if (Math.abs(delta) < 0.000001) {
-                console.log(`[ChainWatcher] ✓ 买入校准 ${targetAssetId.slice(-6)} WS:${wsSize} = 链上:${realFill}`);
+                console.log(`[ChainWatcher] ✓ 买入校准 ${positionTokenId.slice(-6)} WS:${wsSize} = 链上:${realFill}`);
               } else {
-                positions.localSize[targetAssetId] = (positions.localSize[targetAssetId] ?? 0) + delta;
-                console.log(`[ChainWatcher] ✓ 买入校准 ${targetAssetId.slice(-6)} WS:${wsSize} → 链上:${realFill} (delta:${delta >= 0 ? "+" : ""}${delta.toFixed(6)})`);
+                positions.localSize[positionTokenId] = (positions.localSize[positionTokenId] ?? 0) + delta;
+                console.log(`[ChainWatcher] ✓ 买入校准 ${positionTokenId.slice(-6)} WS:${wsSize} → 链上:${realFill} (delta:${delta >= 0 ? "+" : ""}${delta.toFixed(6)})`);
               }
-              positions.apiSize[targetAssetId] = positions.localSize[targetAssetId];
-              positions.apiVerified[targetAssetId] = true;
+              positions.apiSize[positionTokenId] = positions.localSize[positionTokenId];
+              positions.apiVerified[positionTokenId] = true;
               broadcastState();
             })();
           }
@@ -2775,12 +2778,12 @@ async function placeGtcFollowupSellAfterBuy(args: {
     }
   }
 
-  const localAvail = positions.localSize[tokenId] ?? 0;
-  const capped = Math.min(baseShares, localAvail);
-  let sellSize = floorToDecimals(capped * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
+  // 不再用 positions.localSize 做 cap：WS 事件可能落在互补 token 上，
+  // 导致实际买入 token 的 localSize 未被更新（为 0）。baseShares 已是链上/REST 真实成交。
+  let sellSize = floorToDecimals(baseShares * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
 
-  if (!(sellSize > 0)) {
-    console.warn(`${tag} 跟卖份额无效 base:${baseShares} local:${localAvail} capped:${capped}`);
+  if (!(sellSize > 0.001)) {
+    console.warn(`${tag} 跟卖份额无效 base:${baseShares} sellSize:${sellSize}`);
     return;
   }
 
