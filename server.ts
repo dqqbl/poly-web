@@ -1423,6 +1423,7 @@ function startUserWs(): void {
           if (
             side === "buy"
             && gtcFollowBuyDelta != null
+            && pendingMeta?.source === "manual-gtc"
             && Number.isFinite(price)
             && Number.isFinite(size)
             && direction
@@ -2338,6 +2339,16 @@ function extractOrderError(result: unknown): string {
   return "";
 }
 
+/** CLOB 在链上 MINED 后条件 token 余额索引可能短暂滞后，可 refresh+重试 */
+function isTransientClobBalanceOrAllowanceMessage(message: string): boolean {
+  const m = message.toLowerCase();
+  return m.includes("not enough balance") || m.includes("allowance") || m.includes("balance / allowance");
+}
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function fmtOrderField(value: unknown): string {
   if (value == null || value === "") return "-";
   return String(value);
@@ -2610,6 +2621,7 @@ async function placeGtcFollowupSellAfterBuy(args: {
     return;
   }
 
+  const maxSellAttempts = 6;
   try {
     const tickSize = await clobClient!.getTickSize(tokenId);
     const negRisk = await clobClient!.getNegRisk(tokenId);
@@ -2620,31 +2632,62 @@ async function placeGtcFollowupSellAfterBuy(args: {
       console.warn(`${tag} 跟卖限价无效 ${limitPrice}`);
       return;
     }
-    const result = await clobClient!.createAndPostOrder(
-      { tokenID: tokenId, side: Side.SELL, price: limitPrice, size: sellSize },
-      { tickSize, negRisk },
-      OrderType.GTC,
-    );
-    const orderError = extractOrderError(result);
-    if (result?.status === 400 || orderError) {
-      console.warn(`${tag} 跟卖失败: ${orderError || result?.status || "unknown"}`);
-      return;
+    for (let attempt = 0; attempt < maxSellAttempts; attempt++) {
+      try {
+        await clobClient!.updateBalanceAllowance({
+          asset_type: AssetType.CONDITIONAL,
+          token_id: tokenId,
+        });
+      } catch (syncErr) {
+        console.warn(
+          `${tag} updateBalanceAllowance(CONDITIONAL) 第 ${attempt + 1}/${maxSellAttempts} 次:`,
+          syncErr instanceof Error ? syncErr.message : String(syncErr),
+        );
+      }
+      await delayMs(200 + attempt * 400);
+
+      try {
+        const result = await clobClient!.createAndPostOrder(
+          { tokenID: tokenId, side: Side.SELL, price: limitPrice, size: sellSize },
+          { tickSize, negRisk },
+          OrderType.GTC,
+        );
+        const orderError = extractOrderError(result);
+        if (result?.status === 400 || orderError) {
+          const errText = orderError || String(result?.status ?? "unknown");
+          if (isTransientClobBalanceOrAllowanceMessage(errText) && attempt < maxSellAttempts - 1) {
+            console.warn(`${tag} 条件余额未就绪: ${errText} → 重试 ${attempt + 2}/${maxSellAttempts}`);
+            continue;
+          }
+          console.warn(`${tag} 跟卖失败: ${errText}`);
+          return;
+        }
+        const dirZh = direction === "up" ? "涨" : "跌";
+        console.log(`${tag} 卖出${dirZh} ${sellSize} @${limitPrice} 状态:${result?.status ?? "unknown"}`);
+        rememberPendingTradeMeta({
+          orderId: typeof result?.orderID === "string" && result.orderID ? result.orderID : undefined,
+          ts: Date.now(),
+          windowStart: state.windowStart,
+          side: "sell",
+          direction,
+          amount: sellSize,
+          worstPrice: limitPrice,
+          source: "manual-gtc-follow",
+        });
+        broadcastState();
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (isTransientClobBalanceOrAllowanceMessage(msg) && attempt < maxSellAttempts - 1) {
+          console.warn(`${tag} 跟卖异常(可重试): ${msg} → ${attempt + 2}/${maxSellAttempts}`);
+          continue;
+        }
+        console.error(`${tag} 异常:`, msg);
+        return;
+      }
     }
-    const dirZh = direction === "up" ? "涨" : "跌";
-    console.log(`${tag} 卖出${dirZh} ${sellSize} @${limitPrice} 状态:${result?.status ?? "unknown"}`);
-    rememberPendingTradeMeta({
-      orderId: typeof result?.orderID === "string" && result.orderID ? result.orderID : undefined,
-      ts: Date.now(),
-      windowStart: state.windowStart,
-      side: "sell",
-      direction,
-      amount: sellSize,
-      worstPrice: limitPrice,
-      source: "manual-gtc-follow",
-    });
-    broadcastState();
   } catch (err) {
-    console.error(`${tag} 异常:`, err instanceof Error ? err.message : String(err));
+    console.error(`${tag} 准备跟卖失败:`, err instanceof Error ? err.message : String(err));
   }
 }
 
