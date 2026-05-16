@@ -104,6 +104,8 @@ interface PendingTradeMeta {
   source: string;
   exitReason?: string;
   roundEntry?: string;
+  /** 若为 GTC 买单挂出且用户开启「快捷」：MINED 后再挂一张 GTC 买，价位 = 成交价 + 此值 */
+  gtcFollowBuyDelta?: number;
 }
 
 interface ClientSession {
@@ -638,6 +640,9 @@ const state = {
   asks: new Map<string, string>(),
   bestBid: "-",
   bestAsk: "-",
+  /** 跌 outcome token 的 BBO（与 bestBid/bestAsk 的 up token 分离） */
+  downBestBid: "-",
+  downBestAsk: "-",
   lastPrice: "-",
   lastSide: "",
   updatedAt: 0,
@@ -1084,6 +1089,8 @@ function buildStatePayload(options: boolean | StatePayloadOptions = false): Reco
     windowEnd:    state.windowEnd,
     bestBid:      state.bestBid,
     bestAsk:      state.bestAsk,
+    downBestBid:  state.downBestBid,
+    downBestAsk:  state.downBestAsk,
     probabilityReady: isProbabilityReady(),
     lastPrice:    state.lastPrice,
     lastSide:     state.lastSide,
@@ -1374,6 +1381,7 @@ function startUserWs(): void {
           const price = typeof evt.price === "number" ? evt.price : parseFloat(String(evt.price ?? ""));
           if (!assetId || !side || !Number.isFinite(size) || size <= 0) continue;
           const pendingMeta = consumePendingTradeMeta(evt);
+          const gtcFollowBuyDelta = pendingMeta?.gtcFollowBuyDelta;
           const direction = pendingMeta?.direction ?? getDirectionByAssetId(assetId);
           const orderId = typeof evt.taker_order_id === "string" && evt.taker_order_id
             ? evt.taker_order_id
@@ -1411,6 +1419,22 @@ function startUserWs(): void {
             + `${txHash ? ` tx:${txHash.slice(0, 10)}...` : ""}`
           );
           broadcastState();
+
+          if (
+            side === "buy"
+            && gtcFollowBuyDelta != null
+            && Number.isFinite(price)
+            && Number.isFinite(size)
+            && direction
+          ) {
+            void placeGtcFollowupBuy({
+              tokenId: assetId,
+              direction,
+              fillPrice: price,
+              fillSize: size,
+              priceBump: gtcFollowBuyDelta,
+            });
+          }
 
           // 买入后异步链上校准：WS 推送的 size 有 ~1% 偏差，用链上真实值修正
           if (side === "buy" && txHash && PROXY_ADDRESS) {
@@ -1455,6 +1479,7 @@ let marketPingTimer:   ReturnType<typeof setInterval> | null = null;
 let marketRenderTimer: ReturnType<typeof setInterval> | null = null;
 let marketValidationTimer: ReturnType<typeof setInterval> | null = null;
 let lastBestBidAskTimestamp = 0;
+let lastDownBestBidAskTimestamp = 0;
 let bestBidAskPausedUntil = 0;
 let marketValidationMismatchStreak = 0;
 let marketReconnectPending = false;
@@ -1491,13 +1516,31 @@ function applyBestBidAskUpdate(
   return true;
 }
 
+function applyDownBestBidAskUpdate(
+  bestBid: unknown,
+  bestAsk: unknown,
+  timestamp: unknown,
+): boolean {
+  if (typeof bestBid !== "string" || typeof bestAsk !== "string") return false;
+  if (Date.now() < bestBidAskPausedUntil) return false;
+  const ts = parseEventTimestamp(timestamp);
+  if (ts > 0 && ts < lastDownBestBidAskTimestamp) return false;
+  if (ts > 0) lastDownBestBidAskTimestamp = ts;
+  state.downBestBid = bestBid;
+  state.downBestAsk = bestAsk;
+  return true;
+}
+
 function clearProbabilityForMs(ms: number, reason: string): void {
   const until = Date.now() + ms;
   if (until > bestBidAskPausedUntil) bestBidAskPausedUntil = until;
   marketBestReady = false;
   lastBestBidAskTimestamp = 0;
+  lastDownBestBidAskTimestamp = 0;
   state.bestBid = "-";
   state.bestAsk = "-";
+  state.downBestBid = "-";
+  state.downBestAsk = "-";
   state.updatedAt = Date.now();
   console.warn(`[概率校验] ${reason}，清空概率 ${ms}ms`);
   broadcastState();
@@ -1599,8 +1642,14 @@ function startMarketWs(expectedWindowStart: number, upTokenId: string, downToken
           state.updatedAt = Date.now();
           broadcastState();
         } else if (evt.event_type === "best_bid_ask") {
-          if (evt.asset_id && evt.asset_id !== upTokenId) continue;
-          if (!applyBestBidAskUpdate(evt.best_bid, evt.best_ask, evt.timestamp)) continue;
+          const aid = typeof evt.asset_id === "string" ? evt.asset_id : "";
+          let updated = false;
+          if (aid === upTokenId) {
+            if (applyBestBidAskUpdate(evt.best_bid, evt.best_ask, evt.timestamp)) updated = true;
+          } else if (aid === downTokenId) {
+            if (applyDownBestBidAskUpdate(evt.best_bid, evt.best_ask, evt.timestamp)) updated = true;
+          }
+          if (!updated) continue;
           state.updatedAt = Date.now();
           broadcastState();
         } else if (evt.event_type === "price_change" && evt.price_changes) {
@@ -1633,6 +1682,8 @@ function startMarketWs(expectedWindowStart: number, upTokenId: string, downToken
     marketBestReady = false;
     state.bestBid = "-";
     state.bestAsk = "-";
+    state.downBestBid = "-";
+    state.downBestAsk = "-";
     state.updatedAt = Date.now();
     console.log("[MarketWS] 连接断开，1秒后重连");
     wsStatus.market = false; broadcastWsStatus();
@@ -1917,6 +1968,8 @@ function clearWindowRuntimeState(): void {
   state.asks.clear();
   state.bestBid = "-";
   state.bestAsk = "-";
+  state.downBestBid = "-";
+  state.downBestAsk = "-";
   state.lastPrice = "-";
   state.lastSide = "";
   state.priceToBeat = null;
@@ -1989,10 +2042,12 @@ async function subscribeWindow(windowStart: number): Promise<void> {
   state.conditionId = info.conditionId;
   state.bids.clear(); state.asks.clear();
   state.bestBid = "-"; state.bestAsk = "-";
+  state.downBestBid = "-"; state.downBestAsk = "-";
   state.lastPrice = "-"; state.lastSide = "";
   state.binanceOffset = null;
   state.updatedAt = Date.now();
   lastBestBidAskTimestamp = 0;
+  lastDownBestBidAskTimestamp = 0;
   marketBestReady = false;
   bestBidAskPausedUntil = 0;
   marketValidationMismatchStreak = 0;
@@ -2487,6 +2542,309 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
   }
 }
 
+const GTC_LIMIT_OFFSETS = [0.02, 0.1, 0.3] as const;
+const GTC_FOLLOW_BUMP_VALUES = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3] as const;
+
+function isNearAllowedOffset(value: number, allowed: readonly number[]): boolean {
+  return allowed.some((a) => Math.abs(a - value) < 1e-5);
+}
+
+function normalizeOpenOrderSide(raw: unknown): "buy" | "sell" | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim().toLowerCase();
+  if (s === "buy") return "buy";
+  if (s === "sell") return "sell";
+  return null;
+}
+
+interface PlaceGtcOrderInput {
+  direction: StrategyDirection;
+  side: "buy" | "sell";
+  shares: number;
+  limitOffset: number;
+  followBuyDelta?: number | null;
+  source?: string;
+}
+
+async function placeGtcFollowupBuy(args: {
+  tokenId: string;
+  direction: StrategyDirection;
+  fillPrice: number;
+  fillSize: number;
+  priceBump: number;
+}): Promise<void> {
+  const tag = "[Order:manual-gtc-follow]";
+  const { tokenId, direction, fillPrice, fillSize, priceBump } = args;
+  if (!(await ensureClobClient())) {
+    console.warn(`${tag} CLOB 未初始化，跳过跟单`);
+    return;
+  }
+  if (isOrderWindowStale()) {
+    console.warn(`${tag} 窗口已过期，跳过跟单`);
+    return;
+  }
+  if (!Number.isFinite(fillPrice) || !Number.isFinite(fillSize) || fillSize <= 0) return;
+  try {
+    const tickSize = await clobClient!.getTickSize(tokenId);
+    const negRisk = await clobClient!.getNegRisk(tokenId);
+    const priceDecimals = getDecimalPlaces(tickSize);
+    const rawLimit = fillPrice + priceBump;
+    const limitPrice = floorToDecimals(Math.min(0.99, Math.max(0.01, rawLimit)), priceDecimals);
+    const normalizedSize = floorToDecimals(fillSize, 2);
+    if (normalizedSize <= 0 || limitPrice <= 0) {
+      console.warn(`${tag} 跟单参数无效 size:${normalizedSize} price:${limitPrice}`);
+      return;
+    }
+    const result = await clobClient!.createAndPostOrder(
+      { tokenID: tokenId, side: Side.BUY, price: limitPrice, size: normalizedSize },
+      { tickSize, negRisk },
+      OrderType.GTC,
+    );
+    const orderError = extractOrderError(result);
+    if (result?.status === 400 || orderError) {
+      console.warn(`${tag} 跟单失败: ${orderError || result?.status || "unknown"}`);
+      return;
+    }
+    const sideZh = "买入";
+    const dirZh = direction === "up" ? "涨" : "跌";
+    console.log(`${tag} ${sideZh}${dirZh} ${normalizedSize} @${limitPrice} 状态:${result?.status ?? "unknown"}`);
+    rememberPendingTradeMeta({
+      orderId: typeof result?.orderID === "string" && result.orderID ? result.orderID : undefined,
+      ts: Date.now(),
+      windowStart: state.windowStart,
+      side: "buy",
+      direction,
+      amount: normalizedSize,
+      worstPrice: limitPrice,
+      source: "manual-gtc-follow",
+    });
+    broadcastState();
+  } catch (err) {
+    console.error(`${tag} 异常:`, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function placeGtcOrder(input: PlaceGtcOrderInput): Promise<OrderExecutionResult> {
+  const { direction, side, shares, limitOffset, source = "manual-gtc" } = input;
+  const orderTag = `[Order:${source}]`;
+
+  if (!direction || !side || !shares || shares <= 0) {
+    return { success: false, statusCode: 400, body: { error: "参数错误" }, errorMessage: "参数错误" };
+  }
+  if (!isNearAllowedOffset(limitOffset, GTC_LIMIT_OFFSETS)) {
+    return { success: false, statusCode: 400, body: { error: "limitOffset 须为 0.02 / 0.1 / 0.3" }, errorMessage: "limitOffset 非法" };
+  }
+  let followBuyDelta: number | undefined;
+  if (side === "buy") {
+    const raw = input.followBuyDelta;
+    if (raw != null) {
+      if (!isNearAllowedOffset(raw, GTC_FOLLOW_BUMP_VALUES)) {
+        return { success: false, statusCode: 400, body: { error: "followBuyDelta 须为 0.05 … 0.3 之一" }, errorMessage: "followBuyDelta 非法" };
+      }
+      followBuyDelta = raw;
+    }
+  }
+
+  if (!(await ensureClobClient())) {
+    return {
+      success: false,
+      statusCode: 500,
+      body: { error: "CLOB 客户端未初始化，请检查 POLYMARKET_PRIVATE_KEY" },
+      errorMessage: "CLOB 客户端未初始化，请检查 POLYMARKET_PRIVATE_KEY",
+    };
+  }
+  if (isOrderWindowStale()) {
+    return {
+      success: false,
+      statusCode: 409,
+      body: { error: "当前市场窗口已过期，等待切换到新窗口" },
+      errorMessage: "当前市场窗口已过期，等待切换到新窗口",
+    };
+  }
+  if (!isProbabilityReady()) {
+    return {
+      success: false,
+      statusCode: 409,
+      body: { error: "盘口概率暂不可用，等待WS恢复" },
+      errorMessage: "盘口概率暂不可用，等待WS恢复",
+    };
+  }
+
+  const tokenId = direction === "up" ? state.upTokenId : state.downTokenId;
+  if (!tokenId) {
+    return {
+      success: false,
+      statusCode: 400,
+      body: { error: "当前窗口市场未就绪" },
+      errorMessage: "当前窗口市场未就绪",
+    };
+  }
+
+  let bestBid = 0;
+  let bestAsk = 0;
+  try {
+    ({ bestBid, bestAsk } = await fetchBookTopOfBook(tokenId));
+  } catch {
+    return {
+      success: false,
+      statusCode: 500,
+      body: { error: "无法获取盘口价格" },
+      errorMessage: "无法获取盘口价格",
+    };
+  }
+
+  if (side === "buy" && !(bestAsk > 0)) {
+    return {
+      success: false,
+      statusCode: 409,
+      body: { error: "无卖盘，无法计算买单限价", bestBid, bestAsk },
+      errorMessage: "无卖盘，无法计算买单限价",
+    };
+  }
+  if (side === "sell" && !(bestBid > 0)) {
+    return {
+      success: false,
+      statusCode: 409,
+      body: { error: "无买盘，无法计算卖单限价", bestBid, bestAsk },
+      errorMessage: "无买盘，无法计算卖单限价",
+    };
+  }
+
+  const rawLimit = side === "buy" ? bestAsk - limitOffset : bestBid + limitOffset;
+
+  try {
+    const tickSize = await clobClient!.getTickSize(tokenId);
+    const negRisk = await clobClient!.getNegRisk(tokenId);
+    const priceDecimals = getDecimalPlaces(tickSize);
+    const limitPrice = floorToDecimals(Math.min(0.99, Math.max(0.01, rawLimit)), priceDecimals);
+    const normalizedSize = floorToDecimals(shares, 2);
+    const orderDebug = `tickSize:${tickSize} size:${shares}->${normalizedSize} limit:${rawLimit}->${limitPrice}`;
+    if (normalizedSize <= 0 || limitPrice <= 0) {
+      console.warn(`${orderTag} GTC 参数精度处理后无效 ${orderDebug}`);
+      return {
+        success: false,
+        statusCode: 400,
+        body: { error: "下单参数精度处理后无效", bestBid, bestAsk, limitPrice },
+        errorMessage: "下单参数精度处理后无效",
+      };
+    }
+
+    const result = await clobClient!.createAndPostOrder(
+      {
+        tokenID: tokenId,
+        side: side === "buy" ? Side.BUY : Side.SELL,
+        price: limitPrice,
+        size: normalizedSize,
+      },
+      { tickSize, negRisk },
+      OrderType.GTC,
+    );
+    const sideZh = side === "buy" ? "买入" : "卖出";
+    const dirZh = direction === "up" ? "涨" : "跌";
+    const rawStatus = result?.status ?? "未知";
+    const orderError = extractOrderError(result);
+
+    if (result?.status === 400 || orderError) {
+      console.warn(`${orderTag} GTC ${sideZh}${dirZh} 状态:${rawStatus} 原因:${orderError || "-"} ${orderDebug}`);
+      return {
+        success: false,
+        statusCode: 400,
+        body: { error: orderError || `下单被拒绝 status=${rawStatus}`, result, bestBid, bestAsk, limitPrice },
+        errorMessage: orderError || `下单被拒绝 status=${rawStatus}`,
+      };
+    }
+
+    console.log(`${orderTag} GTC ${sideZh}${dirZh} ${normalizedSize} 价:${limitPrice} 状态:${rawStatus} ${orderDebug}`);
+    rememberPendingTradeMeta({
+      orderId: typeof result?.orderID === "string" && result.orderID ? result.orderID : undefined,
+      ts: Date.now(),
+      windowStart: state.windowStart,
+      side,
+      direction,
+      amount: normalizedSize,
+      worstPrice: limitPrice,
+      source,
+      ...(followBuyDelta != null ? { gtcFollowBuyDelta: followBuyDelta } : {}),
+    });
+    if (!(typeof result?.orderID === "string" && result.orderID)) {
+      console.warn(`${orderTag} GTC 回包缺少 orderID，成交匹配可能降级`);
+    }
+    broadcastState();
+    return {
+      success: true,
+      statusCode: 200,
+      body: { success: true, result, bestBid, bestAsk, limitPrice, followBuyDelta: followBuyDelta ?? null },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${orderTag} GTC 失败:`, msg);
+    return {
+      success: false,
+      statusCode: 500,
+      body: { error: msg },
+      errorMessage: msg,
+    };
+  }
+}
+
+async function cancelOpenOrdersForScope(scope: "buys" | "sells" | "all"): Promise<OrderExecutionResult> {
+  const orderTag = "[OrderCancel]";
+  if (!(await ensureClobClient())) {
+    return {
+      success: false,
+      statusCode: 500,
+      body: { error: "CLOB 客户端未初始化" },
+      errorMessage: "CLOB 客户端未初始化",
+    };
+  }
+  const tokenIds = new Set([state.upTokenId, state.downTokenId].filter(Boolean));
+  if (tokenIds.size === 0) {
+    return {
+      success: false,
+      statusCode: 400,
+      body: { error: "当前窗口市场未就绪" },
+      errorMessage: "当前窗口市场未就绪",
+    };
+  }
+  let openOrders: Awaited<ReturnType<ClobClient["getOpenOrders"]>>;
+  try {
+    openOrders = await clobClient!.getOpenOrders(undefined, false);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, statusCode: 500, body: { error: msg }, errorMessage: msg };
+  }
+  const toCancel = openOrders.filter((o) => {
+    if (!tokenIds.has(o.asset_id)) return false;
+    const os = normalizeOpenOrderSide(o.side);
+    if (!os) return false;
+    if (scope === "all") return true;
+    if (scope === "buys") return os === "buy";
+    return os === "sell";
+  });
+  let cancelled = 0;
+  const failedIds: string[] = [];
+  for (const o of toCancel) {
+    try {
+      await clobClient!.cancelOrder({ orderID: o.id });
+      cancelled++;
+    } catch {
+      failedIds.push(o.id);
+    }
+  }
+  console.log(`${orderTag} scope=${scope} 请求撤回 ${toCancel.length} 成功 ${cancelled} 失败 ${failedIds.length}`);
+  return {
+    success: failedIds.length === 0,
+    statusCode: 200,
+    body: {
+      scope,
+      requested: toCancel.length,
+      cancelled,
+      failedIds,
+    },
+    ...(failedIds.length ? { errorMessage: "部分订单未能撤回" } : {}),
+  };
+}
+
 async function strategyBuy(direction: StrategyDirection, amount: number): Promise<void> {
   strategyRuntime.posBeforeBuy = getDirectionLocalSize(direction);
   strategyRuntime.actionTs = Date.now();
@@ -2974,6 +3332,35 @@ app.post("/api/order", async (req, res) => {
     slippage?: number;
   };
   const result = await placeOrder({ direction, side, amount, slippage, source: "manual" });
+  res.status(result.statusCode).json(result.body);
+});
+
+app.post("/api/order/gtc", async (req, res) => {
+  const { direction, side, shares, limitOffset, followBuyDelta } = req.body as {
+    direction: "up" | "down";
+    side: "buy" | "sell";
+    shares: number;
+    limitOffset: number;
+    followBuyDelta?: number | null;
+  };
+  const result = await placeGtcOrder({
+    direction,
+    side,
+    shares,
+    limitOffset,
+    followBuyDelta: followBuyDelta ?? null,
+    source: "manual-gtc",
+  });
+  res.status(result.statusCode).json(result.body);
+});
+
+app.post("/api/orders/cancel", async (req, res) => {
+  const scope = (req.body as { scope?: string }).scope;
+  if (scope !== "buys" && scope !== "sells" && scope !== "all") {
+    res.status(400).json({ error: "scope 须为 buys | sells | all" });
+    return;
+  }
+  const result = await cancelOpenOrdersForScope(scope);
   res.status(result.statusCode).json(result.body);
 });
 
