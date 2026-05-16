@@ -530,18 +530,84 @@ function parseTradeEventTimestamp(evt: Record<string, unknown>): number {
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
-function consumePendingTradeMeta(evt: Record<string, unknown>): PendingTradeMeta | null {
-  cleanupPendingTradeMeta();
-  const candidateIds: string[] = [];
-  if (typeof evt.taker_order_id === "string" && evt.taker_order_id) {
-    candidateIds.push(evt.taker_order_id);
-  }
-  if (Array.isArray(evt.maker_orders)) {
-    for (const makerOrder of evt.maker_orders) {
-      if (!isRecord(makerOrder) || typeof makerOrder.order_id !== "string" || !makerOrder.order_id) continue;
-      candidateIds.push(makerOrder.order_id);
+function _extractCandidateOrderIds(evt: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  const taker = evt.taker_order_id ?? evt.takerOrderId;
+  if (typeof taker === "string" && taker) ids.push(taker);
+  const makers = evt.maker_orders ?? evt.makerOrders;
+  if (Array.isArray(makers)) {
+    for (const mo of makers) {
+      if (!isRecord(mo)) continue;
+      const oid = mo.order_id ?? mo.orderId;
+      if (typeof oid === "string" && oid) ids.push(oid);
     }
   }
+  return ids;
+}
+
+/**
+ * 从 WS TRADE 事件中提取**我们自己**的成交份额。
+ * 参考 demo 项目 _extract_fill_for_order：
+ * - 我们是 taker 时，event-level size 就是自己的；
+ * - 我们是 maker 时，event-level size 可能是 aggregate，需要从 maker_orders 中累加 matched_amount。
+ */
+function extractOwnFillFromEvt(
+  evt: Record<string, unknown>,
+  candidateIds: string[],
+): { price: number; size: number; matchedOrderId: string } | null {
+  if (!candidateIds.length) return null;
+
+  const eventPrice = typeof evt.price === "number" ? evt.price : parseFloat(String(evt.price ?? ""));
+  const eventSize = typeof evt.size === "number" ? evt.size : parseFloat(String(evt.size ?? ""));
+
+  for (const target of candidateIds) {
+    const takerId =
+      (typeof evt.taker_order_id === "string" ? evt.taker_order_id : "") ||
+      (typeof evt.takerOrderId === "string" ? evt.takerOrderId : "");
+    if (takerId && takerId.toLowerCase() === target.toLowerCase()) {
+      if (Number.isFinite(eventPrice) && eventPrice > 0 && Number.isFinite(eventSize) && eventSize > 0) {
+        return { price: eventPrice, size: eventSize, matchedOrderId: target };
+      }
+      return null;
+    }
+
+    const makers = evt.maker_orders ?? evt.makerOrders;
+    if (Array.isArray(makers)) {
+      let totalSize = 0;
+      let totalNotional = 0;
+      for (const mo of makers) {
+        if (!isRecord(mo)) continue;
+        const oid =
+          (typeof mo.order_id === "string" ? mo.order_id : "") ||
+          (typeof mo.orderId === "string" ? mo.orderId : "");
+        if (oid.toLowerCase() !== target.toLowerCase()) continue;
+        const sz =
+          typeof mo.matched_amount === "number"
+            ? mo.matched_amount
+            : typeof mo.matchedAmount === "number"
+              ? mo.matchedAmount
+              : parseFloat(String(mo.matched_amount ?? mo.matchedAmount ?? ""));
+        const pr = typeof mo.price === "number" ? mo.price : parseFloat(String(mo.price ?? ""));
+        if (!Number.isFinite(sz) || sz <= 0 || !Number.isFinite(pr) || pr <= 0) continue;
+        totalSize += sz;
+        totalNotional += sz * pr;
+      }
+      if (totalSize > 0) {
+        return { price: totalNotional / totalSize, size: totalSize, matchedOrderId: target };
+      }
+    }
+  }
+
+  // fallback: 无法精确定位时退化为 event-level（单 maker 场景通常没问题）
+  if (Number.isFinite(eventPrice) && eventPrice > 0 && Number.isFinite(eventSize) && eventSize > 0) {
+    return { price: eventPrice, size: eventSize, matchedOrderId: candidateIds[0] };
+  }
+  return null;
+}
+
+function consumePendingTradeMeta(evt: Record<string, unknown>): PendingTradeMeta | null {
+  cleanupPendingTradeMeta();
+  const candidateIds = _extractCandidateOrderIds(evt);
   for (const id of candidateIds) {
     const meta = pendingTradeMeta.get(id);
     if (!meta) continue;
@@ -554,6 +620,7 @@ function consumePendingTradeMeta(evt: Record<string, unknown>): PendingTradeMeta
   const size = typeof evt.size === "number" ? evt.size : Number(evt.size);
   if (!side || !assetId || !Number.isFinite(size)) return null;
 
+  // 退化匹配：先严格匹配 same asset + same side
   let bestKey: string | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
   for (const [key, meta] of pendingTradeMeta) {
@@ -565,6 +632,21 @@ function consumePendingTradeMeta(evt: Record<string, unknown>): PendingTradeMeta
       bestKey = key;
     }
   }
+
+  // 第二轮宽松匹配：Maker 买单成交时 WS 常推 side=SELL（对手 taker 卖出），
+  // 此时 strict 匹配会漏掉我们的 buy meta。对 same asset 的 buy pending 做 fallback。
+  if (!bestKey && side === "sell") {
+    for (const [key, meta] of pendingTradeMeta) {
+      const directionTokenId = meta.direction === "up" ? state.upTokenId : state.downTokenId;
+      if (directionTokenId !== assetId || meta.side !== "buy") continue;
+      const score = Math.abs(meta.amount - size) * 1000 + Math.abs(Date.now() - meta.ts) / 1000;
+      if (score < bestScore) {
+        bestScore = score;
+        bestKey = key;
+      }
+    }
+  }
+
   if (!bestKey) return null;
   const meta = pendingTradeMeta.get(bestKey) || null;
   if (meta) pendingTradeMeta.delete(bestKey);
@@ -1416,16 +1498,16 @@ function startUserWs(): void {
           const tradeId = evt.id as string;
           if (!rememberBounded(positions.confirmedIds, positions.confirmedIdOrder, tradeId, MAX_CONFIRMED_TRADE_IDS)) continue;
           const assetId = typeof evt.asset_id === "string" ? evt.asset_id : "";
-          const size = typeof evt.size === "number" ? evt.size : parseFloat(String(evt.size ?? ""));
           const side = normalizeTradeSide(evt.side);
-          const price = typeof evt.price === "number" ? evt.price : parseFloat(String(evt.price ?? ""));
+          const candidateIds = _extractCandidateOrderIds(evt);
+          const ownFill = extractOwnFillFromEvt(evt, candidateIds);
+          const size = ownFill?.size ?? (typeof evt.size === "number" ? evt.size : parseFloat(String(evt.size ?? "")));
+          const price = ownFill?.price ?? (typeof evt.price === "number" ? evt.price : parseFloat(String(evt.price ?? "")));
+          const orderId = ownFill?.matchedOrderId ?? candidateIds[0];
           if (!assetId || !side || !Number.isFinite(size) || size <= 0) continue;
           const pendingMeta = consumePendingTradeMeta(evt);
           const gtcFollowBuyDelta = pendingMeta?.gtcFollowBuyDelta;
           const direction = pendingMeta?.direction ?? getDirectionByAssetId(assetId);
-          const orderId = typeof evt.taker_order_id === "string" && evt.taker_order_id
-            ? evt.taker_order_id
-            : pendingMeta?.orderId;
           const txHash = typeof evt.transaction_hash === "string" && evt.transaction_hash
             ? evt.transaction_hash
             : undefined;
@@ -1453,10 +1535,11 @@ function startUserWs(): void {
             });
           }
           console.log(
-            `[UserWS] MINED ${side.toUpperCase()} ${size} @ ${Number.isFinite(price) ? price : "-"}`
+            `[UserWS] MINED ${side.toUpperCase()} ${size.toFixed(4)} @ ${Number.isFinite(price) ? price : "-"}`
             + ` asset: ...${assetId.slice(-6)}`
-            + `${orderId ? ` order:${orderId}` : ""}`
+            + `${orderId ? ` order:${orderId.slice(0, 12)}...` : ""}`
             + `${txHash ? ` tx:${txHash.slice(0, 10)}...` : ""}`
+            + `${ownFill && ownFill.matchedOrderId ? ` ownFill` : " eventFill"}`
           );
           broadcastState();
 
@@ -1482,6 +1565,7 @@ function startUserWs(): void {
                 wsFillSize: resolved.wsFillSize,
                 priceBump: gtcFollowBuyDelta,
                 txHash,
+                orderId,
               });
             } else {
               console.warn("[Order:manual-gtc-follow] 无法解析 outcome 成交价/份额，跳过跟卖");
@@ -2630,7 +2714,24 @@ interface PlaceGtcOrderInput {
   source?: string;
 }
 
-/** GTC 买单 MINED 后：挂限价卖（止盈），份额优先链上 TransferSingle，并与本地仓位取小后再略缩 */
+/** 通过 REST 查询订单 size_matched，获取真实成交份额 */
+async function fetchOrderSizeMatched(orderId: string): Promise<number | null> {
+  if (!orderId || !(await ensureClobClient())) return null;
+  try {
+    const order = await clobClient!.getOrder(orderId);
+    if (!order) return null;
+    const data = (order as any)?.order ?? order;
+    if (!data || typeof data !== "object") return null;
+    const matched = (data as any).size_matched ?? (data as any).sizeMatched;
+    if (matched == null || matched === "") return null;
+    const val = parseFloat(String(matched));
+    return Number.isFinite(val) && val > 0 ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+/** GTC 买单 MINED 后：挂限价卖（止盈），份额优先链上 TransferSingle / REST size_matched，并与本地仓位取小后再略缩 */
 async function placeGtcFollowupSellAfterBuy(args: {
   tokenId: string;
   direction: StrategyDirection;
@@ -2638,9 +2739,10 @@ async function placeGtcFollowupSellAfterBuy(args: {
   wsFillSize: number;
   priceBump: number;
   txHash?: string;
+  orderId?: string;
 }): Promise<void> {
   const tag = "[Order:manual-gtc-follow]";
-  const { tokenId, direction, fillPrice, wsFillSize, priceBump, txHash } = args;
+  const { tokenId, direction, fillPrice, wsFillSize, priceBump, txHash, orderId } = args;
   if (!(await ensureClobClient())) {
     console.warn(`${tag} CLOB 未初始化，跳过跟卖`);
     return;
@@ -2652,22 +2754,60 @@ async function placeGtcFollowupSellAfterBuy(args: {
   if (!Number.isFinite(fillPrice) || !Number.isFinite(wsFillSize) || wsFillSize <= 0) return;
 
   let baseShares = wsFillSize;
+
+  // 1) 优先链上 receipt
   if (txHash && PROXY_ADDRESS) {
     const chain = await getRealFillFromTx(txHash, PROXY_ADDRESS);
     if (chain != null && Number.isFinite(chain) && chain > 0) {
       baseShares = chain;
       console.log(`${tag} 链上成交份额 ${chain}（WS ${wsFillSize}）`);
     } else {
-      console.log(`${tag} 链上查询失败，跟卖份额暂用 WS ${wsFillSize}`);
+      console.log(`${tag} 链上查询失败，尝试 REST size_matched`);
+    }
+  }
+
+  // 2) fallback: REST API size_matched（参考 trading-bot 的做法）
+  if (baseShares === wsFillSize && orderId) {
+    const restMatched = await fetchOrderSizeMatched(orderId);
+    if (restMatched != null && restMatched > 0) {
+      baseShares = restMatched;
+      console.log(`${tag} REST size_matched ${restMatched}（WS ${wsFillSize}）`);
     }
   }
 
   const localAvail = positions.localSize[tokenId] ?? 0;
   const capped = Math.min(baseShares, localAvail);
-  const sellSize = floorToDecimals(capped * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
+  let sellSize = floorToDecimals(capped * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
 
   if (!(sellSize > 0)) {
     console.warn(`${tag} 跟卖份额无效 base:${baseShares} local:${localAvail} capped:${capped}`);
+    return;
+  }
+
+  // 3) 卖单前查询 CLOB 条件余额，避免 not enough balance
+  let clobBalance: number | null = null;
+  try {
+    const balResp = (await clobClient!.getBalanceAllowance({
+      asset_type: AssetType.CONDITIONAL,
+      token_id: tokenId,
+    })) as { balance?: string; allowance?: string } | null;
+    if (balResp && balResp.balance != null) {
+      clobBalance = parseFloat(balResp.balance) / 1e6;
+    }
+  } catch (balErr) {
+    console.warn(`${tag} 查询条件余额失败:`, balErr instanceof Error ? balErr.message : String(balErr));
+  }
+
+  if (clobBalance != null && clobBalance >= 0) {
+    const safeFromBalance = floorToDecimals(clobBalance * GTC_FOLLOW_SELL_SIZE_FACTOR, 2);
+    if (safeFromBalance < sellSize) {
+      console.log(`${tag} 条件余额 ${clobBalance} < 目标卖量 ${sellSize}，缩至 ${safeFromBalance}`);
+      sellSize = safeFromBalance;
+    }
+  }
+
+  if (!(sellSize > 0.001)) {
+    console.warn(`${tag} 最终卖量不足（${sellSize}），放弃跟卖`);
     return;
   }
 
@@ -2683,6 +2823,7 @@ async function placeGtcFollowupSellAfterBuy(args: {
       return;
     }
     for (let attempt = 0; attempt < maxSellAttempts; attempt++) {
+      // 重试前刷新 CLOB 条件余额缓存（GET 请求，让服务端同步链上状态）
       try {
         await clobClient!.updateBalanceAllowance({
           asset_type: AssetType.CONDITIONAL,
@@ -2694,7 +2835,8 @@ async function placeGtcFollowupSellAfterBuy(args: {
           syncErr instanceof Error ? syncErr.message : String(syncErr),
         );
       }
-      await delayMs(200 + attempt * 400);
+      // 给链上→CLOB 同步留时间：首等 800ms，逐次递增
+      await delayMs(800 + attempt * 600);
 
       try {
         const result = await clobClient!.createAndPostOrder(
