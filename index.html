@@ -764,6 +764,21 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 #confirm-btn.ready-sell { background: #5a2800; color: #ffb347; }
 #confirm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* 滚仓 */
+#roll-btn {
+  padding: 14px; border-radius: 0 8px 8px 0;
+  border: none; font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: all 0.15s;
+  background: #1a4a7a; color: #7cc8ff;
+}
+#roll-btn:disabled { opacity: 0.5; cursor: not-allowed; background: #21262d; color: #888; }
+#roll-keep-input {
+  padding: 14px; border-radius: 8px 0 0 8px;
+  border: 1px solid #30363d; border-right: none;
+  background: #0d1117; color: #ccc;
+  font-size: 14px; font-family: inherit;
+}
+
 /* 结果提示 */
 #order-result {
   font-size: 13px; padding: 8px 10px; border-radius: 6px;
@@ -1147,11 +1162,25 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     <!-- 结果 -->
     <div id="order-result"></div>
 
+    <!-- 滚仓 -->
+    <div style="margin-top:10px;">
+      <div style="display:flex; align-items:stretch;">
+        <input type="number" id="roll-keep-input" value="0" min="0" step="1"
+               style="flex:1; padding:12px; border-radius:8px 0 0 8px; border:1px solid #30363d; border-right:none; background:#0d1117; color:#ccc; font-size:14px;"
+               placeholder="保底金额 (USDC)">
+        <button id="roll-btn" onclick="submitRoll()" disabled
+                style="flex:1; padding:12px; border-radius:0 8px 8px 0; border:none; background:#1a4a7a; color:#7cc8ff; font-size:14px; font-weight:700; cursor:pointer;">
+          选择方向
+        </button>
+      </div>
+      <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.4">余额减保底，剩余全部市价买入当前方向</div>
+    </div>
+
     <!-- 市价快捷卖出 -->
     <div id="market-follow-block" class="disabled">
-      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后监听 bestBid，触及成交价 + 选项自动市价卖出）</span></div>
+      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后监听 bestBid，触及成交价 + 选项自动市价卖出，点击已选中的项可取消）</span></div>
       <div class="gtc-choice-row gtc-choice-row-wide" id="market-follow-chips">
-        <button type="button" class="tog-btn gtc-choice on" data-bump="0.05" onclick="pickMarketFollowDelta(0.05)">+0.05</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.05" onclick="pickMarketFollowDelta(0.05)">+0.05</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="pickMarketFollowDelta(0.1)">+0.1</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.15" onclick="pickMarketFollowDelta(0.15)">+0.15</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.2" onclick="pickMarketFollowDelta(0.2)">+0.2</button>
@@ -1160,11 +1189,24 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
       </div>
     </div>
 
+    <!-- 触发价格 -->
+    <div>
+      <div style="font-size:12px;color:#777;margin-bottom:5px">触发价格 <span style="font-size:11px;color:#666">（非 +0.00 时条件触发，到达阈值后自动市价下单）</span></div>
+      <div class="gtc-choice-row" id="market-trigger-chips">
+        <button type="button" class="tog-btn gtc-choice on" data-off="0" onclick="pickMarketTriggerOffset(0)">+0.00</button>
+        <button type="button" class="tog-btn gtc-choice" data-off="-0.02" onclick="pickMarketTriggerOffset(-0.02)">-0.02</button>
+        <button type="button" class="tog-btn gtc-choice" data-off="-0.1" onclick="pickMarketTriggerOffset(-0.1)">-0.1</button>
+        <button type="button" class="tog-btn gtc-choice" data-off="-0.3" onclick="pickMarketTriggerOffset(-0.3)">-0.3</button>
+        <button type="button" class="tog-btn gtc-choice" data-off="0.02" onclick="pickMarketTriggerOffset(0.02)">+0.02</button>
+      </div>
+      <div style="font-size:10px;color:#555;margin-top:4px;line-height:1.35">买：卖一价 ± 选项触发；卖：买一价 ∓ 同数值触发</div>
+    </div>
+
     <!-- 滑点 -->
     <div>
       <div style="font-size:12px;color:#777;margin-bottom:5px">滑点保护 <span style="font-size:11px;color:#666">（买+/卖-）</span></div>
       <div class="input-row">
-        <input type="number" id="slippage-input" value="0.05" min="0" max="0.99" step="0.01" style="max-width:100px">
+        <input type="number" id="slippage-input" value="0.02" min="0" max="0.99" step="0.01" style="max-width:100px">
       </div>
     </div>
   </div>
@@ -1806,7 +1848,8 @@ let selDir = null;   // 'up' | 'down'
 let selSide = null;  // 'buy' | 'sell'
 
 // 市价面板状态
-let marketFollowDelta = 0.05;
+let marketFollowDelta = null;
+let marketTriggerOffset = 0;
 
 // GTC 面板状态
 let gtcSelDir = null;
@@ -2289,6 +2332,7 @@ function onMessage(msg) {
   curLastTradeAt = msg.lastTradeAt ?? 0;
   curUsdc = typeof msg.usdc === 'number' ? msg.usdc : null;
   $acctUsdc.textContent  = msg.usdc != null ? `$${msg.usdc.toFixed(2)}` : '—';
+  syncRollKeepDefault();
   if ($acctAllowanceStatus) {
     const status = msg.usdcAllowanceStatus || '—';
     $acctAllowanceStatus.textContent = status;
@@ -2652,17 +2696,38 @@ function updateOrderAvailability() {
       ? `买入 ${selDir === 'up' ? '涨▲' : '跌▼'}`
       : `卖出 ${selDir === 'up' ? '涨▲' : '跌▼'}`;
     $confirmBtn.disabled = false;
+    updateRollBtn();
     return;
   }
   if (ready) {
     $confirmBtn.className = '';
     $confirmBtn.textContent = '等待盘口恢复';
     $confirmBtn.disabled = true;
+    updateRollBtn();
     return;
   }
   $confirmBtn.className = '';
   $confirmBtn.textContent = '选择方向和操作';
   $confirmBtn.disabled = true;
+  updateRollBtn();
+}
+
+function syncRollKeepDefault() {
+  const $input = document.getElementById('roll-keep-input');
+  if (!$input) return;
+  if (curUsdc != null && curUsdc > 0) {
+    $input.value = String(Math.floor(curUsdc * 0.8));
+  } else {
+    $input.value = '0';
+  }
+}
+
+function updateRollBtn() {
+  const $rollBtn = document.getElementById('roll-btn');
+  if (!$rollBtn) return;
+  const ready = selDir && isProbabilityUsable();
+  $rollBtn.disabled = !ready;
+  $rollBtn.textContent = ready ? `滚仓 ${selDir === 'up' ? '涨▲' : '跌▼'}` : '选择方向';
 }
 
 function updatePanel() {
@@ -2687,6 +2752,7 @@ function updatePanel() {
 
   updateOrderAvailability();
   updateEst();
+  updateRollBtn();
 }
 
 function stepAmount(dir) {
@@ -2828,9 +2894,21 @@ function gtcPickFollowDelta(v) {
 }
 
 function pickMarketFollowDelta(v) {
-  marketFollowDelta = v;
+  if (marketFollowDelta != null && Math.abs(marketFollowDelta - v) < 1e-6) {
+    marketFollowDelta = null;
+  } else {
+    marketFollowDelta = v;
+  }
   document.querySelectorAll('#market-follow-chips .gtc-choice').forEach((el) => {
     const dv = parseFloat(el.getAttribute('data-bump') || '');
+    el.classList.toggle('on', marketFollowDelta != null && Math.abs(dv - marketFollowDelta) < 1e-6);
+  });
+}
+
+function pickMarketTriggerOffset(v) {
+  marketTriggerOffset = v;
+  document.querySelectorAll('#market-trigger-chips .gtc-choice').forEach((el) => {
+    const dv = parseFloat(el.getAttribute('data-off') || '');
     el.classList.toggle('on', Math.abs(dv - v) < 1e-6);
   });
 }
@@ -2999,7 +3077,13 @@ async function toggleBacktest() {
 
 // submitClaim 已移除：请在 Polymarket 官网 Settings 中开启 Auto Redeem
 
+let _submitCooldown = false;
+
 async function submitOrder() {
+  if (_submitCooldown) return;
+  _submitCooldown = true;
+  setTimeout(() => { _submitCooldown = false; }, 1000);
+
   const amount = parseFloat($amtInput.value);
   if (!selDir || !selSide || isNaN(amount) || amount <= 0) return;
   if (!isProbabilityUsable()) {
@@ -3028,8 +3112,9 @@ async function submitOrder() {
         direction: selDir,
         side: selSide,
         amount,
-        slippage: parseFloat(document.getElementById('slippage-input').value) || 0.05,
-        followBuyDelta: selSide === 'buy' ? marketFollowDelta : null,
+        slippage: parseFloat(document.getElementById('slippage-input').value) || 0.02,
+        followBuyDelta: (selSide === 'buy' && marketFollowDelta != null) ? marketFollowDelta : null,
+        triggerOffset: marketTriggerOffset,
       }),
     });
     const data = await res.json();
@@ -3051,6 +3136,74 @@ async function submitOrder() {
   setTimeout(() => { $orderResult.className = ''; }, 5000);
 
   updatePanel(); // 恢复按钮
+}
+
+async function submitRoll() {
+  if (_submitCooldown) return;
+  _submitCooldown = true;
+  setTimeout(() => { _submitCooldown = false; }, 1000);
+
+  if (!selDir) {
+    $orderResult.textContent = '✗ 请先选择方向';
+    $orderResult.className = 'fail';
+    setTimeout(() => { $orderResult.className = ''; }, 5000);
+    return;
+  }
+  if (!isProbabilityUsable()) {
+    $orderResult.textContent = '✗ 等待盘口恢复';
+    $orderResult.className = 'fail';
+    setTimeout(() => { $orderResult.className = ''; }, 5000);
+    return;
+  }
+  if (curUsdc == null || curUsdc <= 0) {
+    $orderResult.textContent = '✗ 余额不足';
+    $orderResult.className = 'fail';
+    setTimeout(() => { $orderResult.className = ''; }, 5000);
+    return;
+  }
+
+  const keep = parseFloat(document.getElementById('roll-keep-input').value) || 0;
+  const amount = Math.max(0, curUsdc - keep);
+  if (amount <= 0) {
+    $orderResult.textContent = '✗ 保底金额超过余额';
+    $orderResult.className = 'fail';
+    setTimeout(() => { $orderResult.className = ''; }, 5000);
+    return;
+  }
+
+  const $rollBtn = document.getElementById('roll-btn');
+  if ($rollBtn) { $rollBtn.disabled = true; $rollBtn.textContent = '下单中...'; }
+  $orderResult.className = '';
+  $orderResult.removeAttribute('style');
+
+  try {
+    const res = await fetch('/api/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        direction: selDir,
+        side: 'buy',
+        amount,
+        slippage: parseFloat(document.getElementById('slippage-input').value) || 0.02,
+        followBuyDelta: marketFollowDelta != null ? marketFollowDelta : null,
+        triggerOffset: marketTriggerOffset,
+      }),
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      $orderResult.textContent = `✓ 滚仓成功  状态: ${data.result?.status ?? '-'}`;
+      $orderResult.className = 'ok';
+      recordTradeMarker('buy', selDir);
+    } else {
+      $orderResult.textContent = `✗ ${translateError(data.error) || '滚仓失败'}`;
+      $orderResult.className = 'fail';
+    }
+  } catch (err) {
+    $orderResult.textContent = `✗ 网络错误`;
+    $orderResult.className = 'fail';
+  }
+  setTimeout(() => { $orderResult.className = ''; }, 5000);
+  updateRollBtn();
 }
 
 // ── 价格曲线（1分钟滑动窗口） ─────────────────────────────────

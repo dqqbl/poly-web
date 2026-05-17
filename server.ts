@@ -912,6 +912,107 @@ function checkMarketFollowSells(): void {
   }
 }
 
+// ── 市价条件触发单（买入/卖出） ────────────────────────────────
+interface MarketTriggerOrder {
+  tokenId: string;
+  direction: StrategyDirection;
+  side: "buy" | "sell";
+  amount: number;
+  triggerOffset: number;
+  basePrice: number;
+  slippage: number;
+  createdAt: number;
+  triggered: boolean;
+  windowStart: number;
+}
+const marketTriggerOrders: MarketTriggerOrder[] = [];
+const MARKET_TRIGGER_MAX_AGE_MS = 10 * 60 * 1000;
+
+function pruneMarketTriggerOrders(windowStart?: number): void {
+  const now = Date.now();
+  for (let i = marketTriggerOrders.length - 1; i >= 0; i--) {
+    const m = marketTriggerOrders[i];
+    if (m.triggered || now - m.createdAt > MARKET_TRIGGER_MAX_AGE_MS || (windowStart != null && m.windowStart !== windowStart)) {
+      marketTriggerOrders.splice(i, 1);
+    }
+  }
+}
+
+function registerMarketTriggerOrder(item: Omit<MarketTriggerOrder, "createdAt" | "triggered">): void {
+  pruneMarketTriggerOrders();
+  marketTriggerOrders.push({ ...item, createdAt: Date.now(), triggered: false });
+  const dirZh = item.direction === "up" ? "涨" : "跌";
+  const sideZh = item.side === "buy" ? "买" : "卖";
+  const triggerPrice = item.side === "buy"
+    ? item.basePrice + item.triggerOffset
+    : item.basePrice - item.triggerOffset;
+  console.log(
+    `[MarketTrigger] 注册条件市价${sideZh} ${dirZh} offset=${item.triggerOffset} ` +
+    `triggerPrice=${triggerPrice.toFixed(4)} base=${item.basePrice.toFixed(4)} amount=${item.amount}`
+  );
+}
+
+async function executeMarketTriggerOrder(item: MarketTriggerOrder): Promise<void> {
+  const tag = "[MarketTrigger]";
+  if (item.triggered) return;
+  item.triggered = true;
+  if (isOrderWindowStale()) {
+    console.warn(`${tag} 窗口已过期，跳过条件触发`);
+    return;
+  }
+  const dirZh = item.direction === "up" ? "涨" : "跌";
+  const sideZh = item.side === "buy" ? "买入" : "卖出";
+  console.log(`${tag} 触发条件市价${sideZh} ${dirZh} ${item.amount} slippage=${item.slippage}`);
+  const result = await placeOrder({
+    direction: item.direction,
+    side: item.side,
+    amount: item.amount,
+    slippage: item.slippage,
+    source: "manual-market-trigger",
+  });
+  if (result.success) {
+    console.log(`${tag} 条件触发${sideZh}成功`);
+  } else {
+    console.warn(`${tag} 条件触发${sideZh}失败:`, result.errorMessage || result.body?.error || "unknown");
+  }
+}
+
+/** 在 bestBid/bestAsk 更新后调用，检查是否有条件触发市价单应执行 */
+function checkMarketTriggerOrders(): void {
+  pruneMarketTriggerOrders();
+  if (marketTriggerOrders.length === 0) return;
+  const upAsk = parseFloat(String(state.bestAsk));
+  const upBid = parseFloat(String(state.bestBid));
+  const downAsk = parseFloat(String(state.downBestAsk));
+  const downBid = parseFloat(String(state.downBestBid));
+  for (const item of marketTriggerOrders) {
+    if (item.triggered) continue;
+    let shouldTrigger = false;
+    if (item.side === "buy") {
+      const currentAsk = item.direction === "up" ? upAsk : downAsk;
+      if (!Number.isFinite(currentAsk) || currentAsk <= 0) continue;
+      const triggerPrice = item.basePrice + item.triggerOffset;
+      if (item.triggerOffset <= 0) {
+        shouldTrigger = currentAsk <= triggerPrice;
+      } else {
+        shouldTrigger = currentAsk >= triggerPrice;
+      }
+    } else {
+      const currentBid = item.direction === "up" ? upBid : downBid;
+      if (!Number.isFinite(currentBid) || currentBid <= 0) continue;
+      const triggerPrice = item.basePrice - item.triggerOffset;
+      if (item.triggerOffset <= 0) {
+        shouldTrigger = currentBid >= triggerPrice;
+      } else {
+        shouldTrigger = currentBid <= triggerPrice;
+      }
+    }
+    if (shouldTrigger) {
+      void executeMarketTriggerOrder(item);
+    }
+  }
+}
+
 // ── 广播 ──────────────────────────────────────────────────────
 function send(ws: WebSocket, type: string, data: Record<string, unknown>): void {
   if (ws.readyState !== WebSocket.OPEN) return;
@@ -1794,7 +1895,8 @@ function applyBestBidAskUpdate(
   state.bestBid = bestBid;
   state.bestAsk = bestAsk;
   marketBestReady = true;
-  checkMarketFollowSells(); // 检查市价止盈任务
+  checkMarketFollowSells();   // 检查市价止盈任务
+  checkMarketTriggerOrders(); // 检查条件触发市价单
   scheduleStrategyTick();  // 盘口更新（概率变化）立即触发策略检查
   return true;
 }
@@ -1811,7 +1913,8 @@ function applyDownBestBidAskUpdate(
   if (ts > 0) lastDownBestBidAskTimestamp = ts;
   state.downBestBid = bestBid;
   state.downBestAsk = bestAsk;
-  checkMarketFollowSells(); // 检查市价止盈任务
+  checkMarketFollowSells();   // 检查市价止盈任务
+  checkMarketTriggerOrders(); // 检查条件触发市价单
   return true;
 }
 
@@ -2344,6 +2447,7 @@ async function subscribeWindow(windowStart: number): Promise<void> {
     resetStrategyRuntime(`切换到窗口 ${windowStart}`);
     prunePositionCaches([info.upTokenId, info.downTokenId]);
     pruneMarketFollowSells(windowStart);
+    pruneMarketTriggerOrders(windowStart);
     positions.localSize[info.upTokenId]     = 0;
     positions.localSize[info.downTokenId]   = 0;
     positions.apiSize[info.upTokenId]       = 0;
@@ -2697,6 +2801,8 @@ interface PlaceOrderInput {
   roundEntry?: string;
   /** 市价买入时：成交后监听价格，触及 entryPrice + 此值时自动市价卖出 */
   followBuyDelta?: number | null;
+  /** 市价单条件触发：非 0 时注册触发任务，到达阈值后自动市价下单 */
+  triggerOffset?: number;
 }
 
 interface OrderExecutionResult {
@@ -2761,6 +2867,37 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
       statusCode: 500,
       body: { error: "无法获取盘口价格" },
       errorMessage: "无法获取盘口价格",
+    };
+  }
+
+  // 条件触发：非 0 时注册触发任务，不立即下单
+  const triggerOffset = input.triggerOffset ?? 0;
+  if (triggerOffset !== 0) {
+    const basePrice = side === "buy" ? bestAsk : bestBid;
+    registerMarketTriggerOrder({
+      tokenId,
+      direction,
+      side,
+      amount,
+      triggerOffset,
+      basePrice,
+      slippage: slippageVal,
+      windowStart: state.windowStart,
+    });
+    const triggerPrice = side === "buy" ? basePrice + triggerOffset : basePrice - triggerOffset;
+    return {
+      success: true,
+      statusCode: 200,
+      body: {
+        success: true,
+        trigger: true,
+        triggerOffset,
+        triggerPrice: Math.min(0.99, Math.max(0.01, triggerPrice)),
+        basePrice,
+        bestBid,
+        bestAsk,
+        message: `已注册条件触发单，${side === "buy" ? "卖一" : "买一"}=${basePrice.toFixed(4)} 触发价=${triggerPrice.toFixed(4)}`,
+      },
     };
   }
 
@@ -3736,14 +3873,23 @@ app.post("/api/claim", async (_req, res) => {
 
 // ── REST：下单接口 ────────────────────────────────────────────
 app.post("/api/order", async (req, res) => {
-  const { direction, side, amount, slippage, followBuyDelta } = req.body as {
+  const { direction, side, amount, slippage, followBuyDelta, triggerOffset } = req.body as {
     direction: "up" | "down";
     side: "buy" | "sell";
     amount: number;
     slippage?: number;
     followBuyDelta?: number | null;
+    triggerOffset?: number;
   };
-  const result = await placeOrder({ direction, side, amount, slippage, followBuyDelta: followBuyDelta ?? null, source: "manual" });
+  const result = await placeOrder({
+    direction,
+    side,
+    amount,
+    slippage,
+    followBuyDelta: followBuyDelta ?? null,
+    triggerOffset,
+    source: "manual",
+  });
   res.status(result.statusCode).json(result.body);
 });
 
