@@ -2726,7 +2726,7 @@ function syncRollKeepDefault() {
   const $input = document.getElementById('roll-keep-input');
   if (!$input) return;
   if (curUsdc != null && curUsdc > 0) {
-    $input.value = String(Math.floor(curUsdc * 0.8));
+    $input.value = String(Math.floor(curUsdc * 0.9));
   } else {
     $input.value = '0';
   }
