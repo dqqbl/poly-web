@@ -905,7 +905,8 @@ function checkMarketFollowSells(): void {
     if (item.triggered) continue;
     const currentBid = item.direction === "up" ? upBid : downBid;
     if (!Number.isFinite(currentBid) || currentBid <= 0) continue;
-    const triggerPrice = item.entryPrice + item.followDelta;
+    const useFixedThreshold = item.followDelta >= 0.9;
+    const triggerPrice = useFixedThreshold ? item.followDelta : item.entryPrice + item.followDelta;
     if (currentBid >= triggerPrice) {
       void executeMarketFollowSell(item);
     }
@@ -3105,7 +3106,8 @@ async function placeGtcFollowupSellAfterBuy(args: {
     const tickSize = await clobClient!.getTickSize(tokenId);
     const negRisk = await clobClient!.getNegRisk(tokenId);
     const priceDecimals = getDecimalPlaces(tickSize);
-    const rawLimit = fillPrice + priceBump;
+    const useFixedPrice = priceBump >= 0.9;
+    const rawLimit = useFixedPrice ? priceBump : fillPrice + priceBump;
     const limitPrice = floorToDecimals(Math.min(0.99, Math.max(0.01, rawLimit)), priceDecimals);
     if (limitPrice <= 0) {
       console.warn(`${tag} 跟卖限价无效 ${limitPrice}`);

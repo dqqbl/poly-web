@@ -779,6 +779,12 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
   font-size: 14px; font-family: inherit;
 }
 
+/* 金额区域展开/收起 */
+#amount-section-header:hover { color: #aaa; }
+#amount-section-body.collapsed { display: none; }
+#amount-toggle-icon { display: inline-block; transition: transform 0.2s; }
+#amount-toggle-icon.collapsed { transform: rotate(-90deg); }
+
 /* 结果提示 */
 #order-result {
   font-size: 13px; padding: 8px 10px; border-radius: 6px;
@@ -1134,61 +1140,6 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
       </div>
     </div>
 
-    <!-- 数量输入 -->
-    <div>
-      <div style="font-size:12px;color:#777;margin-bottom:5px">
-        <span id="amount-label">金额</span>
-      </div>
-      <div class="input-row">
-        <button class="step-btn" onclick="stepAmount(-1)">−</button>
-        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
-          <input type="number" id="amount-input" placeholder="0.00" min="0" step="1"
-                 oninput="updateEst()" style="width:100%;text-align:center">
-          <span id="amount-unit" style="font-size:13px;font-weight:700;color:#555;pointer-events:none;line-height:1">USDC</span>
-        </div>
-        <button class="step-btn" onclick="stepAmount(1)">+</button>
-        <button class="max-btn" id="max-btn" onclick="fillMax()" style="visibility:hidden">最大</button>
-      </div>
-    </div>
-
-    <!-- 预估 -->
-    <div id="est-row">
-      当前价: <span id="est-price">—</span>&nbsp;&nbsp;预估: <span id="est-result">—</span>
-    </div>
-
-    <!-- 确认 -->
-    <button id="confirm-btn" onclick="submitOrder()" disabled>选择方向和操作</button>
-
-    <!-- 结果 -->
-    <div id="order-result"></div>
-
-    <!-- 滚仓 -->
-    <div style="margin-top:10px;">
-      <div style="display:flex; align-items:stretch;">
-        <input type="number" id="roll-keep-input" value="0" min="0" step="1"
-               style="flex:1; padding:12px; border-radius:8px 0 0 8px; border:1px solid #30363d; border-right:none; background:#0d1117; color:#ccc; font-size:14px;"
-               placeholder="保底金额 (USDC)">
-        <button id="roll-btn" onclick="submitRoll()" disabled
-                style="flex:1; padding:12px; border-radius:0 8px 8px 0; border:none; background:#1a4a7a; color:#7cc8ff; font-size:14px; font-weight:700; cursor:pointer;">
-          选择方向
-        </button>
-      </div>
-      <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.4">余额减保底，剩余全部市价买入当前方向</div>
-    </div>
-
-    <!-- 市价快捷卖出 -->
-    <div id="market-follow-block" class="disabled">
-      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后监听 bestBid，触及成交价 + 选项自动市价卖出，点击已选中的项可取消）</span></div>
-      <div class="gtc-choice-row gtc-choice-row-wide" id="market-follow-chips">
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.05" onclick="pickMarketFollowDelta(0.05)">+0.05</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="pickMarketFollowDelta(0.1)">+0.1</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.15" onclick="pickMarketFollowDelta(0.15)">+0.15</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.2" onclick="pickMarketFollowDelta(0.2)">+0.2</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.25" onclick="pickMarketFollowDelta(0.25)">+0.25</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.3" onclick="pickMarketFollowDelta(0.3)">+0.3</button>
-      </div>
-    </div>
-
     <!-- 触发价格 -->
     <div>
       <div style="font-size:12px;color:#777;margin-bottom:5px">触发价格 <span style="font-size:11px;color:#666">（非 +0.00 时条件触发，到达阈值后自动市价下单）</span></div>
@@ -1200,6 +1151,64 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
         <button type="button" class="tog-btn gtc-choice" data-off="0.02" onclick="pickMarketTriggerOffset(0.02)">+0.02</button>
       </div>
       <div style="font-size:10px;color:#555;margin-top:4px;line-height:1.35">买：卖一价 ± 选项触发；卖：买一价 ∓ 同数值触发</div>
+    </div>
+
+    <!-- 数量输入（可展开/收起） -->
+    <div id="amount-section">
+      <div id="amount-section-header" style="font-size:12px;color:#777;margin-bottom:5px;cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;" onclick="toggleAmountSection()">
+        <span id="amount-toggle-icon" style="font-size:10px;color:#888;transition:transform 0.2s;">▼</span>
+        <span id="amount-label">金额</span>
+      </div>
+      <div id="amount-section-body">
+        <div class="input-row">
+          <button class="step-btn" onclick="stepAmount(-1)">−</button>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
+            <input type="number" id="amount-input" placeholder="0.00" min="0" step="1"
+                   oninput="updateEst()" style="width:100%;text-align:center">
+            <span id="amount-unit" style="font-size:13px;font-weight:700;color:#555;pointer-events:none;line-height:1">USDC</span>
+          </div>
+          <button class="step-btn" onclick="stepAmount(1)">+</button>
+          <button class="max-btn" id="max-btn" onclick="fillMax()" style="visibility:hidden">最大</button>
+        </div>
+
+        <!-- 预估 -->
+        <div id="est-row">
+          当前价: <span id="est-price">—</span>&nbsp;&nbsp;预估: <span id="est-result">—</span>
+        </div>
+
+        <!-- 确认 -->
+        <button id="confirm-btn" onclick="submitOrder()" disabled>选择方向和操作</button>
+
+        <!-- 结果 -->
+        <div id="order-result"></div>
+
+        <!-- 滚仓 -->
+        <div style="margin-top:10px;">
+          <div style="display:flex; align-items:stretch;">
+            <input type="number" id="roll-keep-input" value="0" min="0" step="1"
+                   style="flex:1; padding:12px; border-radius:8px 0 0 8px; border:1px solid #30363d; border-right:none; background:#0d1117; color:#ccc; font-size:14px;"
+                   placeholder="保底金额 (USDC)">
+            <button id="roll-btn" onclick="submitRoll()" disabled
+                    style="flex:1; padding:12px; border-radius:0 8px 8px 0; border:none; background:#1a4a7a; color:#7cc8ff; font-size:14px; font-weight:700; cursor:pointer;">
+              选择方向
+            </button>
+          </div>
+          <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.4">余额减保底，剩余全部市价买入当前方向</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 市价快捷卖出 -->
+    <div id="market-follow-block" class="disabled">
+      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后监听 bestBid，触及阈值自动市价卖出；0.98 为固定阈值，其余为相对成交价偏移。点击已选中的项可取消）</span></div>
+      <div class="gtc-choice-row gtc-choice-row-wide" id="market-follow-chips">
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.05" onclick="pickMarketFollowDelta(0.05)">+0.05</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="pickMarketFollowDelta(0.1)">+0.1</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.15" onclick="pickMarketFollowDelta(0.15)">+0.15</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.2" onclick="pickMarketFollowDelta(0.2)">+0.2</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.25" onclick="pickMarketFollowDelta(0.25)">+0.25</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.98" onclick="pickMarketFollowDelta(0.98)">0.98</button>
+      </div>
     </div>
 
     <!-- 滑点 -->
@@ -1267,14 +1276,14 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
     </div>
 
     <div id="gtc-follow-block" class="disabled">
-      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后按链上真实份额略缩，以成交价 + 选项挂 GTC <b>卖</b>）</span></div>
+      <div style="font-size:12px;color:#777;margin-bottom:5px">快捷卖出 <span style="font-size:11px;color:#666">（仅买入：成交后按链上真实份额略缩挂单；0.98 为固定挂单价，其余为成交价 + 偏移）</span></div>
       <div class="gtc-choice-row gtc-choice-row-wide" id="gtc-follow-chips">
         <button type="button" class="tog-btn gtc-choice on" data-bump="0.05" onclick="gtcPickFollowDelta(0.05)">+0.05</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.1" onclick="gtcPickFollowDelta(0.1)">+0.1</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.15" onclick="gtcPickFollowDelta(0.15)">+0.15</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.2" onclick="gtcPickFollowDelta(0.2)">+0.2</button>
         <button type="button" class="tog-btn gtc-choice" data-bump="0.25" onclick="gtcPickFollowDelta(0.25)">+0.25</button>
-        <button type="button" class="tog-btn gtc-choice" data-bump="0.3" onclick="gtcPickFollowDelta(0.3)">+0.3</button>
+        <button type="button" class="tog-btn gtc-choice" data-bump="0.98" onclick="gtcPickFollowDelta(0.98)">0.98</button>
       </div>
     </div>
 
@@ -2728,6 +2737,15 @@ function updateRollBtn() {
   const ready = selDir && isProbabilityUsable();
   $rollBtn.disabled = !ready;
   $rollBtn.textContent = ready ? `滚仓 ${selDir === 'up' ? '涨▲' : '跌▼'}` : '选择方向';
+}
+
+let amountSectionOpen = true;
+function toggleAmountSection() {
+  amountSectionOpen = !amountSectionOpen;
+  const body = document.getElementById('amount-section-body');
+  const icon = document.getElementById('amount-toggle-icon');
+  if (body) body.classList.toggle('collapsed', !amountSectionOpen);
+  if (icon) icon.classList.toggle('collapsed', !amountSectionOpen);
 }
 
 function updatePanel() {
