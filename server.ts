@@ -2979,7 +2979,7 @@ async function placeOrder(input: PlaceOrderInput): Promise<OrderExecutionResult>
 }
 
 const GTC_LIMIT_OFFSETS = [0.02, 0.1, 0.3, 0, -0.02] as const;
-const GTC_FOLLOW_BUMP_VALUES = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3] as const;
+const GTC_FOLLOW_BUMP_VALUES = [0.05, 0.1, 0.15, 0.2, 0.25, 0.98] as const;
 /** 跟卖份额 = min(链上或WS成交, 本地仓) × 此系数，略小于真实可卖，减少拒单 */
 const GTC_FOLLOW_SELL_SIZE_FACTOR = 0.997;
 
