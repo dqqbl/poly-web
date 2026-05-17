@@ -755,6 +755,7 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 
 /* 确认按钮 */
 #confirm-btn {
+  width: 100%; margin-top: 8px;
   padding: 14px; border-radius: 8px;
   border: none; font-size: 16px; font-weight: 700;
   cursor: pointer; transition: all 0.15s;
@@ -1181,20 +1182,20 @@ body.low-data-mode .hist-item { padding: 5px 0; border-bottom-color: #1a1f28; }
 
         <!-- 结果 -->
         <div id="order-result"></div>
+      </div>
 
-        <!-- 滚仓 -->
-        <div style="margin-top:10px;">
-          <div style="display:flex; align-items:stretch;">
-            <input type="number" id="roll-keep-input" value="0" min="0" step="1"
-                   style="flex:1; padding:12px; border-radius:8px 0 0 8px; border:1px solid #30363d; border-right:none; background:#0d1117; color:#ccc; font-size:14px;"
-                   placeholder="保底金额 (USDC)">
-            <button id="roll-btn" onclick="submitRoll()" disabled
-                    style="flex:1; padding:12px; border-radius:0 8px 8px 0; border:none; background:#1a4a7a; color:#7cc8ff; font-size:14px; font-weight:700; cursor:pointer;">
-              选择方向
-            </button>
-          </div>
-          <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.4">余额减保底，剩余全部市价买入当前方向</div>
+      <!-- 滚仓 -->
+      <div style="margin-top:10px;">
+        <div style="display:flex; align-items:stretch;">
+          <input type="number" id="roll-keep-input" value="0" min="0" step="1"
+                 style="flex:1; padding:12px; border-radius:8px 0 0 8px; border:1px solid #30363d; border-right:none; background:#0d1117; color:#ccc; font-size:14px;"
+                 placeholder="保底金额 (USDC)">
+          <button id="roll-btn" onclick="submitRoll()" disabled
+                  style="flex:1; padding:12px; border-radius:0 8px 8px 0; border:none; background:#1a4a7a; color:#7cc8ff; font-size:14px; font-weight:700; cursor:pointer;">
+            选择方向
+          </button>
         </div>
+        <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.4">余额减保底，剩余全部市价买入当前方向</div>
       </div>
     </div>
 
